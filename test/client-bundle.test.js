@@ -145,6 +145,62 @@ test('a preset\'s SpeakToggle does not speak voice/spoken events from a session 
   assert.equal(calls.length, 0, 'teacher SpeakToggle must not fetch TTS for a sister session event')
 })
 
+test('switching sessions discards audio still in flight for the session left behind', async () => {
+  // TTS generation can take tens of seconds. If the user switches sessions
+  // before a queued fetch resolves, that audio must not play into the new
+  // session — it belongs to the session that requested it.
+  const { moduleObj } = loadBundle()
+  const plugin = moduleObj.createVoiceClient({
+    presetName: 'sister',
+    ttsPath: '/dsh-sister/tts',
+    styles: { paimon: { label: '派蒙', instruct: 'paimon-instruct' } },
+    defaultStyle: 'paimon',
+  })
+  const { slots, entries } = mockSlots()
+  plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
+
+  const played = []
+  class FakeAudio {
+    constructor(url) { this.url = url }
+    play() { played.push(this.url); return Promise.resolve() }
+    pause() {}
+  }
+  const savedAudio = globalThis.Audio
+  const savedURL = globalThis.URL
+  const savedFetch = globalThis.fetch
+  globalThis.Audio = FakeAudio
+  globalThis.URL = { createObjectURL: (blob) => 'blob:' + blob.id, revokeObjectURL: () => {} }
+  let resolveFetch
+  globalThis.fetch = () => new Promise((resolve) => { resolveFetch = resolve })
+
+  try {
+    const state = { byId: { s1: { agentPreset: 'sister' }, s2: { agentPreset: 'sister' } } }
+    // Session s1 speaks; its TTS fetch is still pending (slow generation).
+    SpeakToggle({
+      sessionId: 's1',
+      useSessions: (sel) => sel(state),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 1, text: 'hello from session one' }, lastCheer: null }),
+      session: { nodes: [], chat: { order: [], nodes: {} } },
+    })
+    // User switches to s2 before the fetch resolves.
+    SpeakToggle({
+      sessionId: 's2',
+      useSessions: (sel) => sel(state),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+      session: { nodes: [], chat: { order: [], nodes: {} } },
+    })
+    // Now s1's slow TTS generation finally completes.
+    resolveFetch({ ok: true, blob: () => Promise.resolve({ id: 's1-audio' }) })
+    await Promise.resolve().then(() => {}).then(() => {}).then(() => {})
+  } finally {
+    globalThis.Audio = savedAudio
+    globalThis.URL = savedURL
+    globalThis.fetch = savedFetch
+  }
+  assert.deepEqual(played, [], 'session-1 audio must not play after switching to session 2')
+})
+
 test('_test helpers extract assistant text by kind', () => {
   const { moduleObj } = loadBundle()
   const { assistantNodeText, latestAssistantText, speakable } = moduleObj._test
