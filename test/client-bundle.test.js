@@ -207,6 +207,88 @@ test('switching sessions discards audio still in flight for the session left beh
   assert.deepEqual(played, [], 'session-1 audio must not play after switching to session 2')
 })
 
+test('speakBrowser aborts an older in-flight request when a newer one arrives', () => {
+  // Only the latest speak/cheer should ever reach TTS: an older reply the
+  // conversation has already moved past must not keep occupying the
+  // single-worker generation queue behind the newest one.
+  const { moduleObj } = loadBundle()
+  const plugin = moduleObj.createVoiceClient({
+    presetName: 'sister',
+    ttsPath: '/dsh-sister/tts',
+    styles: { paimon: { label: '派蒙', instruct: 'x' } },
+    defaultStyle: 'paimon',
+  })
+  const { slots, entries } = mockSlots()
+  plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
+
+  const fetchCalls = []
+  const savedFetch = globalThis.fetch
+  const savedSetTimeout = globalThis.setTimeout
+  const savedClearTimeout = globalThis.clearTimeout
+  globalThis.fetch = (url, init) => { fetchCalls.push({ url, signal: init.signal }); return new Promise(() => {}) }
+  globalThis.setTimeout = () => 0 // avoid scheduling a real 5s give-up timer
+  globalThis.clearTimeout = () => {}
+  try {
+    const state = { byId: { s1: { agentPreset: 'sister' } } }
+    SpeakToggle({
+      sessionId: 's1',
+      useSessions: (sel) => sel(state),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 1, text: 'old message' }, lastCheer: null }),
+      session: { nodes: [], chat: { order: [], nodes: {} } },
+    })
+    SpeakToggle({
+      sessionId: 's1',
+      useSessions: (sel) => sel(state),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 2, text: 'new message' }, lastCheer: null }),
+      session: { nodes: [], chat: { order: [], nodes: {} } },
+    })
+  } finally {
+    globalThis.fetch = savedFetch
+    globalThis.setTimeout = savedSetTimeout
+    globalThis.clearTimeout = savedClearTimeout
+  }
+  assert.equal(fetchCalls.length, 2)
+  assert.equal(fetchCalls[0].signal.aborted, true, 'the older in-flight request must be aborted')
+  assert.equal(fetchCalls[1].signal.aborted, false, 'the newest request must still be active')
+})
+
+test('speakBrowser gives up after 5s so a stuck request cannot block whatever comes after it', () => {
+  const { moduleObj } = loadBundle()
+  const plugin = moduleObj.createVoiceClient({
+    presetName: 'sister',
+    ttsPath: '/dsh-sister/tts',
+    styles: { paimon: { label: '派蒙', instruct: 'x' } },
+    defaultStyle: 'paimon',
+  })
+  const { slots, entries } = mockSlots()
+  plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
+
+  let capturedSignal = null
+  let timeoutCallback = null
+  let capturedDelay = null
+  const savedSetTimeout = globalThis.setTimeout
+  const savedFetch = globalThis.fetch
+  globalThis.setTimeout = (fn, ms) => { timeoutCallback = fn; capturedDelay = ms; return 0 }
+  globalThis.fetch = (url, init) => { capturedSignal = init.signal; return new Promise(() => {}) }
+  try {
+    SpeakToggle({
+      sessionId: 's1',
+      useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 1, text: 'hello' }, lastCheer: null }),
+      session: { nodes: [], chat: { order: [], nodes: {} } },
+    })
+    assert.equal(capturedDelay, 5000, 'gives up after 5 seconds')
+    assert.equal(capturedSignal.aborted, false)
+    timeoutCallback() // simulate the 5s elapsing without a response
+    assert.equal(capturedSignal.aborted, true, 'the stuck request is aborted once the timeout fires')
+  } finally {
+    globalThis.setTimeout = savedSetTimeout
+    globalThis.fetch = savedFetch
+  }
+})
+
 test('a preset\'s CheerChip does not display a cheer fired in another preset\'s session', () => {
   // store.cheer is shared by every mounted preset's CheerChip (they all
   // subscribe to the same module-level store and render at the same fixed
@@ -281,7 +363,7 @@ test('truncateForSpeech caps text length so one long reply cannot monopolize the
   assert.equal(hardCut, 'C'.repeat(100) + '…')
 })
 
-test('speakBrowser sends truncated text to the TTS endpoint for a very long reply', () => {
+test('speakBrowser sends truncated text to the TTS endpoint for a very long reply', async () => {
   const { moduleObj } = loadBundle()
   const plugin = moduleObj.createVoiceClient({
     presetName: 'teacher',
@@ -296,7 +378,10 @@ test('speakBrowser sends truncated text to the TTS endpoint for a very long repl
   const longReply = '第一句话说明背景信息。'.repeat(30) // way past MAX_SPEAK_CHARS
   const calls = []
   const savedFetch = globalThis.fetch
-  globalThis.fetch = (url) => { calls.push(url); return new Promise(() => {}) }
+  // Resolve (rather than hang forever) so speakBrowser's internal 5s
+  // give-up timer gets cleared instead of leaking a real pending timer
+  // past the end of this test.
+  globalThis.fetch = (url) => { calls.push(url); return Promise.resolve({ ok: true, blob: () => Promise.resolve({ id: 'audio' }) }) }
   try {
     SpeakToggle({
       sessionId: 's1',
@@ -304,6 +389,7 @@ test('speakBrowser sends truncated text to the TTS endpoint for a very long repl
       useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 1, text: longReply }, lastCheer: null }),
       session: { nodes: [], chat: { order: [], nodes: {} } },
     })
+    await Promise.resolve().then(() => {}).then(() => {}).then(() => {})
   } finally {
     globalThis.fetch = savedFetch
   }
