@@ -38,6 +38,7 @@ for (const type of [SPEAK_EVENT, SPOKEN_EVENT, CHEER_EVENT]) {
 }
 
 export const VOICE_NAME = 'dsh-voice-core'
+export { DEFAULT_STYLES, DEFAULT_STYLE, DEFAULT_CHEERS }
 
 export const TICK_MS = 30_000
 
