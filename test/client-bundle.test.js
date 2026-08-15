@@ -22,6 +22,11 @@ function loadBundle() {
   }
   globalThis.window = {
     __ModuleLoader__: { load: (def) => { captured = def } },
+    // speakBrowser guards on `typeof window.fetch === 'function'` but then
+    // calls the bare `fetch(...)` — which resolves via globalThis, not this
+    // stub object. Keep this truthy so the guard passes; tests that need to
+    // observe/intercept the actual call must stub globalThis.fetch instead.
+    fetch: () => {},
   }
   // eslint-disable-next-line no-eval
   ;(0, eval)(source)
@@ -104,6 +109,40 @@ test('single-style config omits the picker button (no choice to make)', () => {
   assert.equal(tree.type, 'div')
   const buttons = tree.children.filter((c) => c && c.type === 'button')
   assert.equal(buttons.length, 1, 'only the speak toggle when one style')
+})
+
+test('a preset\'s SpeakToggle does not speak voice/spoken events from a session of another preset', () => {
+  // Every mounted preset's SpeakToggle receives the same active-session
+  // projection via useProjection('voiceSpeak') (there's only one active
+  // session). Without the isVoice gate on the "explicit speak" effect, the
+  // sister session's cheer got read aloud in teacher's voice too.
+  const { moduleObj } = loadBundle()
+  const plugin = moduleObj.createVoiceClient({
+    presetName: 'teacher',
+    ttsPath: '/dsh-teacher/tts',
+    styles: { onee: { label: '御姐', instruct: 'onee-instruct' } },
+    defaultStyle: 'onee',
+  })
+  const { slots, entries } = mockSlots()
+  plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
+
+  // speakBrowser guards on window.fetch but actually calls the bare global
+  // fetch(...), so the spy must replace globalThis.fetch, not window.fetch.
+  const calls = []
+  const savedFetch = globalThis.fetch
+  globalThis.fetch = (url) => { calls.push(url); return new Promise(() => {}) }
+  try {
+    SpeakToggle({
+      sessionId: 's1',
+      useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }), // active session is SISTER, not teacher
+      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 1, text: '嗨嗨～你来啦！' }, lastCheer: null }),
+      session: { nodes: [], chat: { order: [], nodes: {} } },
+    })
+  } finally {
+    globalThis.fetch = savedFetch
+  }
+  assert.equal(calls.length, 0, 'teacher SpeakToggle must not fetch TTS for a sister session event')
 })
 
 test('_test helpers extract assistant text by kind', () => {
