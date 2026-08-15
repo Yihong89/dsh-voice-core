@@ -34,6 +34,27 @@ function loadBundle() {
     // observe/intercept the actual call must stub globalThis.fetch instead.
     fetch: () => {},
   }
+  // This harness never invokes a useEffect's returned cleanup (there is no
+  // real unmount/reconciliation here — each test just calls a component as
+  // a plain function), so any code that starts a setInterval would leak a
+  // live timer past the end of whichever test triggered it (watchQueue's
+  // polling, for one). Default to safe no-ops; a test that needs to
+  // observe real interval/timeout behavior installs its own local
+  // override and restores it in a finally block (see the speakBrowser
+  // 5s-timeout and CheerChip tests).
+  globalThis.setInterval = () => 0
+  globalThis.clearInterval = () => {}
+  // The auto-read effect is the ONLY path into voice.request() (see
+  // client.js) and debounces 1000ms before firing. Fire that specific
+  // delay immediately so tests don't need a real 1s wait; leave every
+  // other delay (voice.request's 5s/120s give-up timers) as a no-op by
+  // default, same reasoning as above — a test that needs to observe THOSE
+  // installs its own more specific override locally.
+  globalThis.setTimeout = (fn, ms) => {
+    if (ms === 1000) fn()
+    return 0
+  }
+  globalThis.clearTimeout = () => {}
   // eslint-disable-next-line no-eval
   ;(0, eval)(source)
   assert.ok(captured, 'bundle did not call __ModuleLoader__.load')
@@ -43,6 +64,13 @@ function loadBundle() {
     throw new Error(`unexpected require: ${spec}`)
   })
   return { moduleObj, reactStub }
+}
+
+/** A session snapshot whose latest assistant message is (seq, text) — the
+ * ONLY thing that can trigger voice.request() now (see client.js: the
+ * speak/cheer tool's own text no longer speaks, only the actual reply). */
+function assistantSession(seq, text) {
+  return { nodes: [{ kind: 'assistant', seq, blocks: [{ kind: 'text', text }] }], chat: { order: [], nodes: {} } }
 }
 
 function mockSlots() {
@@ -117,11 +145,11 @@ test('single-style config omits the picker button (no choice to make)', () => {
   assert.equal(buttons.length, 1, 'only the speak toggle when one style')
 })
 
-test('a preset\'s SpeakToggle does not speak voice/spoken events from a session of another preset', () => {
+test('a preset\'s SpeakToggle does not auto-read a session belonging to another preset', () => {
   // Every mounted preset's SpeakToggle receives the same active-session
-  // projection via useProjection('voiceSpeak') (there's only one active
-  // session). Without the isVoice gate on the "explicit speak" effect, the
-  // sister session's cheer got read aloud in teacher's voice too.
+  // projection and session content (there's only one active session).
+  // Without the isVoice gate, a sister session's reply got auto-read in
+  // teacher's voice too.
   const { moduleObj } = loadBundle()
   const plugin = moduleObj.createVoiceClient({
     presetName: 'teacher',
@@ -142,13 +170,13 @@ test('a preset\'s SpeakToggle does not speak voice/spoken events from a session 
     SpeakToggle({
       sessionId: 's1',
       useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }), // active session is SISTER, not teacher
-      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 1, text: '嗨嗨～你来啦！' }, lastCheer: null }),
-      session: { nodes: [], chat: { order: [], nodes: {} } },
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+      session: assistantSession(1, '嗨嗨～你来啦！'),
     })
   } finally {
     globalThis.fetch = savedFetch
   }
-  assert.equal(calls.length, 0, 'teacher SpeakToggle must not fetch TTS for a sister session event')
+  assert.equal(calls.length, 0, 'teacher SpeakToggle must not fetch TTS for a sister session reply')
 })
 
 test('switching sessions discards audio still in flight for the session left behind', async () => {
@@ -182,12 +210,12 @@ test('switching sessions discards audio still in flight for the session left beh
 
   try {
     const state = { byId: { s1: { agentPreset: 'sister' }, s2: { agentPreset: 'sister' } } }
-    // Session s1 speaks; its TTS fetch is still pending (slow generation).
+    // Session s1's reply is auto-read; its TTS fetch is still pending (slow generation).
     SpeakToggle({
       sessionId: 's1',
       useSessions: (sel) => sel(state),
-      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 1, text: 'hello from session one' }, lastCheer: null }),
-      session: { nodes: [], chat: { order: [], nodes: {} } },
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+      session: assistantSession(1, 'hello from session one'),
     })
     // User switches to s2 before the fetch resolves.
     SpeakToggle({
@@ -227,21 +255,23 @@ test('speakBrowser aborts an older in-flight request when a newer one arrives', 
   const savedSetTimeout = globalThis.setTimeout
   const savedClearTimeout = globalThis.clearTimeout
   globalThis.fetch = (url, init) => { fetchCalls.push({ url, signal: init.signal }); return new Promise(() => {}) }
-  globalThis.setTimeout = () => 0 // avoid scheduling a real 5s give-up timer
+  // Fire the 1s auto-read debounce (so both calls below actually reach
+  // voice.request) but avoid scheduling a real 5s give-up timer.
+  globalThis.setTimeout = (fn, ms) => { if (ms === 1000) fn(); return 0 }
   globalThis.clearTimeout = () => {}
   try {
     const state = { byId: { s1: { agentPreset: 'sister' } } }
     SpeakToggle({
       sessionId: 's1',
       useSessions: (sel) => sel(state),
-      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 1, text: 'old message' }, lastCheer: null }),
-      session: { nodes: [], chat: { order: [], nodes: {} } },
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+      session: assistantSession(1, 'old message'),
     })
     SpeakToggle({
       sessionId: 's1',
       useSessions: (sel) => sel(state),
-      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 2, text: 'new message' }, lastCheer: null }),
-      session: { nodes: [], chat: { order: [], nodes: {} } },
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+      session: assistantSession(2, 'new message'),
     })
   } finally {
     globalThis.fetch = savedFetch
@@ -253,12 +283,12 @@ test('speakBrowser aborts an older in-flight request when a newer one arrives', 
   assert.equal(fetchCalls[1].signal.aborted, false, 'the newest request must still be active')
 })
 
-test('a newer speak request stops and clears audio already queued from an earlier one in the same turn', async () => {
-  // e.g. the cheer tool's short intro and the full auto-read reply for the
-  // SAME assistant turn are two independent speakBrowser calls, each with
-  // its own dedup tracking, unaware of each other. If both finish
-  // generating, they must not play back-to-back ("so many sentences") -
-  // the newer one should stop/clear the earlier one immediately.
+test('a newer speak request stops and clears audio already queued from an earlier one for the same session', async () => {
+  // e.g. a streaming reply: the auto-read effect can fire once for a
+  // partial snapshot and again for the final, longer text of the SAME
+  // message (same seq, different text — the dedup check compares both).
+  // If both finish generating, they must not play back-to-back — the
+  // newer one should stop/clear the earlier one immediately.
   const { moduleObj } = loadBundle()
   const plugin = moduleObj.createVoiceClient({
     presetName: 'sister',
@@ -284,37 +314,37 @@ test('a newer speak request stops and clears audio already queued from an earlie
   const state = { byId: { s1: { agentPreset: 'sister' } } }
 
   try {
-    // First speak (e.g. the cheer's short intro) resolves and starts playing.
-    globalThis.fetch = () => Promise.resolve({ ok: true, blob: () => Promise.resolve({ id: 'cheer-audio' }) })
+    // First auto-read (partial streamed text) resolves and starts playing.
+    globalThis.fetch = () => Promise.resolve({ ok: true, blob: () => Promise.resolve({ id: 'partial-audio' }) })
     SpeakToggle({
       sessionId: 's1',
       useSessions: (sel) => sel(state),
-      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 1, text: 'cheer intro' }, lastCheer: null }),
-      session: { nodes: [], chat: { order: [], nodes: {} } },
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+      session: assistantSession(1, 'partial reply'),
     })
     await Promise.resolve().then(() => {}).then(() => {}).then(() => {})
-    assert.deepEqual(events, [['play', 'blob:cheer-audio']])
+    assert.deepEqual(events, [['play', 'blob:partial-audio']])
 
-    // Second speak (the full auto-read reply for the SAME turn) fires next.
-    globalThis.fetch = () => Promise.resolve({ ok: true, blob: () => Promise.resolve({ id: 'reply-audio' }) })
+    // Second auto-read (the final, longer text of the SAME message) fires next.
+    globalThis.fetch = () => Promise.resolve({ ok: true, blob: () => Promise.resolve({ id: 'final-audio' }) })
     SpeakToggle({
       sessionId: 's1',
       useSessions: (sel) => sel(state),
-      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 2, text: 'full reply text' }, lastCheer: null }),
-      session: { nodes: [], chat: { order: [], nodes: {} } },
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+      session: assistantSession(1, 'partial reply, now complete'),
     })
-    // The cheer clip is stopped immediately, before the reply's own audio
-    // is even ready — it does not get to keep playing to completion.
+    // The partial clip is stopped immediately, before the final reply's own
+    // audio is even ready — it does not get to keep playing to completion.
     assert.ok(
-      events.some((e) => e[0] === 'pause' && e[1] === 'blob:cheer-audio'),
-      'the earlier cheer clip is stopped, not left to finish playing',
+      events.some((e) => e[0] === 'pause' && e[1] === 'blob:partial-audio'),
+      'the earlier partial clip is stopped, not left to finish playing',
     )
 
     await Promise.resolve().then(() => {}).then(() => {}).then(() => {})
     assert.deepEqual(
       events.filter((e) => e[0] === 'play'),
-      [['play', 'blob:cheer-audio'], ['play', 'blob:reply-audio']],
-      'the reply eventually plays once ready',
+      [['play', 'blob:partial-audio'], ['play', 'blob:final-audio']],
+      'the final reply eventually plays once ready',
     )
   } finally {
     globalThis.Audio = savedAudio
@@ -340,14 +370,21 @@ test('speakBrowser gives up after 5s so a stuck request cannot block whatever co
   let capturedDelay = null
   const savedSetTimeout = globalThis.setTimeout
   const savedFetch = globalThis.fetch
-  globalThis.setTimeout = (fn, ms) => { timeoutCallback = fn; capturedDelay = ms; return 0 }
+  // Fire the 1s auto-read debounce immediately (so voice.request actually
+  // runs) but capture the request's own give-up timer for manual control.
+  globalThis.setTimeout = (fn, ms) => {
+    if (ms === 1000) { fn(); return 0 }
+    timeoutCallback = fn
+    capturedDelay = ms
+    return 0
+  }
   globalThis.fetch = (url, init) => { capturedSignal = init.signal; return new Promise(() => {}) }
   try {
     SpeakToggle({
       sessionId: 's1',
       useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
-      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 1, text: 'hello' }, lastCheer: null }),
-      session: { nodes: [], chat: { order: [], nodes: {} } },
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+      session: assistantSession(1, 'hello'),
     })
     assert.equal(capturedDelay, 5000, 'gives up after 5 seconds')
     assert.equal(capturedSignal.aborted, false)
@@ -378,14 +415,14 @@ test('a truncated long reply shows a "hear full reply" chip; clicking it plays t
   const savedSetTimeout = globalThis.setTimeout
   const savedClearTimeout = globalThis.clearTimeout
   globalThis.fetch = (url) => { fetchCalls.push(url); return new Promise(() => {}) }
-  globalThis.setTimeout = () => 0
+  globalThis.setTimeout = (fn, ms) => { if (ms === 1000) fn(); return 0 }
   globalThis.clearTimeout = () => {}
   try {
     SpeakToggle({
       sessionId: 's1',
       useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
-      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 1, text: longReply }, lastCheer: null }),
-      session: { nodes: [], chat: { order: [], nodes: {} } },
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+      session: assistantSession(1, longReply),
     })
     assert.equal(fetchCalls.length, 1)
     const firstSentText = decodeURIComponent(fetchCalls[0].match(/text=([^&]*)/)[1])
@@ -433,15 +470,15 @@ test('a preset\'s HearFullChip does not offer to play another preset\'s truncate
   const savedSetTimeout = globalThis.setTimeout
   const savedClearTimeout = globalThis.clearTimeout
   globalThis.fetch = () => new Promise(() => {})
-  globalThis.setTimeout = () => 0
+  globalThis.setTimeout = (fn, ms) => { if (ms === 1000) fn(); return 0 }
   globalThis.clearTimeout = () => {}
   try {
     const longReply = '第一句话说明背景信息。'.repeat(30)
     sisterSpeakToggle({
       sessionId: 's1',
       useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
-      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 1, text: longReply }, lastCheer: null }),
-      session: { nodes: [], chat: { order: [], nodes: {} } },
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+      session: assistantSession(1, longReply),
     })
     assert.notEqual(sisterHearFullChip(), null, 'sister should offer to play its own truncated reply')
     assert.equal(teacherHearFullChip(), null, 'teacher must not offer to play a sister reply')
@@ -549,8 +586,8 @@ test('speakBrowser sends truncated text to the TTS endpoint for a very long repl
     SpeakToggle({
       sessionId: 's1',
       useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'teacher' } } }),
-      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 1, text: longReply }, lastCheer: null }),
-      session: { nodes: [], chat: { order: [], nodes: {} } },
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+      session: assistantSession(1, longReply),
     })
     await Promise.resolve().then(() => {}).then(() => {}).then(() => {})
   } finally {
@@ -560,6 +597,84 @@ test('speakBrowser sends truncated text to the TTS endpoint for a very long repl
   const sentText = decodeURIComponent(calls[0].match(/text=([^&]*)/)[1])
   assert.ok(sentText.length < longReply.length, 'the full reply must not be sent verbatim to TTS')
   assert.ok(sentText.length <= 151, 'sent text stays within the truncation cap (+ellipsis)')
+})
+
+test('a cheer fires without generating audio; only the assistant\'s actual reply text does', () => {
+  // "I said good night and sister spoke many sentences" -- the cheer
+  // tool's own text and the auto-read of the full reply were two
+  // independent audio triggers for one turn. Now only the reply (what's
+  // actually shown in the chat box) is ever sent to TTS; a cheer with no
+  // reply (e.g. the scheduler's /cheer-text fixed greeting) still shows
+  // its chip but stays silent.
+  const { moduleObj } = loadBundle()
+  const plugin = moduleObj.createVoiceClient({
+    presetName: 'sister',
+    ttsPath: '/dsh-sister/tts',
+    styles: { paimon: { label: '派蒙', instruct: 'x' } },
+    defaultStyle: 'paimon',
+    cheerTitle: '💛 Sister says…',
+  })
+  const { slots, entries } = mockSlots()
+  plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
+  const { component: CheerChip } = entries.filter((e) => e.slot === 'shell.overlay' && e.register().opts.id === 'dsh-voice-sister-cheer-chip')[0].register()
+
+  const calls = []
+  const savedFetch = globalThis.fetch
+  globalThis.fetch = (url) => { calls.push(url); return new Promise(() => {}) }
+  try {
+    SpeakToggle({
+      sessionId: 's1',
+      useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 1, text: '晚上好呀！能见到你超开心～' }, lastCheer: { seq: 1, text: '晚上好呀！能见到你超开心～' } }),
+      // No accompanying assistant chat message this turn (the scheduler's
+      // fixed-greeting path never creates one).
+      session: { nodes: [], chat: { order: [], nodes: {} } },
+    })
+  } finally {
+    globalThis.fetch = savedFetch
+  }
+  assert.equal(calls.length, 0, 'the cheer text alone must not reach TTS')
+  const chip = CheerChip()
+  assert.ok(chip !== null, 'the cheer chip still shows visually')
+})
+
+test('watchQueue polls the health route and getQueueStatus reflects it; ref-counted across multiple watchers', async () => {
+  const { moduleObj } = loadBundle()
+  const { voice } = moduleObj._test
+
+  let intervalCallback = null
+  let clearedId = null
+  const savedSetInterval = globalThis.setInterval
+  const savedClearInterval = globalThis.clearInterval
+  const savedFetch = globalThis.fetch
+  globalThis.setInterval = (fn) => { intervalCallback = fn; return 'timer-1' }
+  globalThis.clearInterval = (id) => { clearedId = id }
+  globalThis.fetch = (url) => {
+    assert.equal(url, '/dsh-sister/tts-health')
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ pending: 3, lastGenerationMs: 4200 }) })
+  }
+  try {
+    assert.equal(voice.getQueueStatus('/dsh-sister/tts'), null, 'no status before anyone is watching')
+
+    const stopA = voice.watchQueue('/dsh-sister/tts')
+    const stopB = voice.watchQueue('/dsh-sister/tts') // second watcher joins the same path
+    assert.ok(intervalCallback !== null, 'starts a single interval on first watcher')
+
+    intervalCallback() // simulate a poll tick
+    await Promise.resolve().then(() => {}).then(() => {}).then(() => {})
+    assert.deepEqual(voice.getQueueStatus('/dsh-sister/tts'), { pending: 3, lastGenerationMs: 4200 })
+
+    stopA()
+    assert.equal(clearedId, null, 'timer stays alive while a watcher remains')
+    stopB()
+    assert.equal(clearedId, 'timer-1', 'timer is torn down once every watcher has stopped')
+    assert.equal(voice.getQueueStatus('/dsh-sister/tts'), null, 'status is gone once nobody is watching')
+  } finally {
+    globalThis.setInterval = savedSetInterval
+    globalThis.clearInterval = savedClearInterval
+    globalThis.fetch = savedFetch
+  }
 })
 
 test('_test helpers extract assistant text by kind', () => {
