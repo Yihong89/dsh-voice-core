@@ -49,6 +49,17 @@ test('client bundle exports createVoiceClient', () => {
   assert.equal(typeof moduleObj.createVoiceClient, 'function')
 })
 
+test('client bundle top-level export is itself a valid cordis plugin (boot-row loader entry)', () => {
+  // The profile patch activates a loader entry named `dsh-voice-core` (see
+  // cordis.patch.yml) whose client bundle IS this module's top-level export
+  // — client-side cordis calls `.apply` on it directly, same as the
+  // server-side no-op apply in index.js. Missing `apply` here breaks the
+  // whole client boot graph with "invalid plugin ... received object".
+  const { moduleObj } = loadBundle()
+  assert.equal(typeof moduleObj.apply, 'function')
+  assert.doesNotThrow(() => moduleObj.apply({ get: () => undefined }))
+})
+
 test('createVoiceClient registers speak toggle, cheer chip, and style picker', () => {
   const { moduleObj } = loadBundle()
   const plugin = moduleObj.createVoiceClient({
