@@ -528,3 +528,13 @@ export async function applyVoice(ctx, input = {}) {
 
   return controller
 }
+
+/**
+ * Cordis plugin shape (default export) for the profile-wide boot row
+ * (`name: dsh-voice-core`): registers voice event types and activates a
+ * loader entry so the client bundle joins the boot graph.
+ */
+export default {
+  name: 'dsh-voice-core',
+  apply,
+}
