@@ -88,7 +88,7 @@ test('createVoiceClient registers speak toggle, cheer chip, and style picker', (
   assert.equal(right.length, 1)
   assert.equal(right[0].register().opts.id, 'dsh-voice-sister-speak')
   const overlays = entries.filter((e) => e.slot === 'shell.overlay').map((e) => e.register().opts.id).sort()
-  assert.deepEqual(overlays, ['dsh-voice-sister-cheer-chip', 'dsh-voice-sister-style-picker'])
+  assert.deepEqual(overlays, ['dsh-voice-sister-cheer-chip', 'dsh-voice-sister-hear-full', 'dsh-voice-sister-style-picker'])
 })
 
 test('single-style config omits the picker button (no choice to make)', () => {
@@ -286,6 +286,99 @@ test('speakBrowser gives up after 5s so a stuck request cannot block whatever co
   } finally {
     globalThis.setTimeout = savedSetTimeout
     globalThis.fetch = savedFetch
+  }
+})
+
+test('a truncated long reply shows a "hear full reply" chip; clicking it plays the untruncated text', () => {
+  const { moduleObj } = loadBundle()
+  const plugin = moduleObj.createVoiceClient({
+    presetName: 'sister',
+    ttsPath: '/dsh-sister/tts',
+    styles: { paimon: { label: '派蒙', instruct: 'x' } },
+    defaultStyle: 'paimon',
+  })
+  const { slots, entries } = mockSlots()
+  plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
+  const { component: HearFullChip } = entries.filter((e) => e.slot === 'shell.overlay' && e.register().opts.id === 'dsh-voice-sister-hear-full')[0].register()
+
+  const longReply = '第一句话说明背景信息。'.repeat(30) // way past MAX_SPEAK_CHARS
+  const fetchCalls = []
+  const savedFetch = globalThis.fetch
+  const savedSetTimeout = globalThis.setTimeout
+  const savedClearTimeout = globalThis.clearTimeout
+  globalThis.fetch = (url) => { fetchCalls.push(url); return new Promise(() => {}) }
+  globalThis.setTimeout = () => 0
+  globalThis.clearTimeout = () => {}
+  try {
+    SpeakToggle({
+      sessionId: 's1',
+      useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 1, text: longReply }, lastCheer: null }),
+      session: { nodes: [], chat: { order: [], nodes: {} } },
+    })
+    assert.equal(fetchCalls.length, 1)
+    const firstSentText = decodeURIComponent(fetchCalls[0].match(/text=([^&]*)/)[1])
+    assert.ok(firstSentText.length < longReply.length, 'the first speak attempt is truncated')
+
+    const chip = HearFullChip()
+    assert.ok(chip !== null, 'the hear-full chip should be visible after truncation')
+    const button = chip.children[0].children[1]
+    assert.equal(button.type, 'button')
+
+    button.props.onClick()
+
+    assert.equal(fetchCalls.length, 2, 'clicking the chip fires a second TTS request')
+    const secondSentText = decodeURIComponent(fetchCalls[1].match(/text=([^&]*)/)[1])
+    assert.equal(secondSentText, longReply, 'the second request sends the full untruncated text')
+    assert.equal(HearFullChip(), null, 'the chip dismisses itself once used')
+  } finally {
+    globalThis.fetch = savedFetch
+    globalThis.setTimeout = savedSetTimeout
+    globalThis.clearTimeout = savedClearTimeout
+  }
+})
+
+test('a preset\'s HearFullChip does not offer to play another preset\'s truncated reply', () => {
+  const { moduleObj } = loadBundle()
+  const { slots, entries } = mockSlots()
+  const sisterPlugin = moduleObj.createVoiceClient({
+    presetName: 'sister', ttsPath: '/dsh-sister/tts',
+    styles: { paimon: { label: '派蒙', instruct: 'x' } }, defaultStyle: 'paimon',
+  })
+  const teacherPlugin = moduleObj.createVoiceClient({
+    presetName: 'teacher', ttsPath: '/dsh-teacher/tts',
+    styles: { onee: { label: '御姐', instruct: 'x' } }, defaultStyle: 'onee',
+  })
+  sisterPlugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  teacherPlugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+
+  const speakToggleById = (id) => entries.filter((e) => e.slot === 'conversation.input.right' && e.register().opts.id === id)[0].register().component
+  const hearFullChipById = (id) => entries.filter((e) => e.slot === 'shell.overlay' && e.register().opts.id === id)[0].register().component
+  const sisterSpeakToggle = speakToggleById('dsh-voice-sister-speak')
+  const sisterHearFullChip = hearFullChipById('dsh-voice-sister-hear-full')
+  const teacherHearFullChip = hearFullChipById('dsh-voice-teacher-hear-full')
+
+  const savedFetch = globalThis.fetch
+  const savedSetTimeout = globalThis.setTimeout
+  const savedClearTimeout = globalThis.clearTimeout
+  globalThis.fetch = () => new Promise(() => {})
+  globalThis.setTimeout = () => 0
+  globalThis.clearTimeout = () => {}
+  try {
+    const longReply = '第一句话说明背景信息。'.repeat(30)
+    sisterSpeakToggle({
+      sessionId: 's1',
+      useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 1, text: longReply }, lastCheer: null }),
+      session: { nodes: [], chat: { order: [], nodes: {} } },
+    })
+    assert.notEqual(sisterHearFullChip(), null, 'sister should offer to play its own truncated reply')
+    assert.equal(teacherHearFullChip(), null, 'teacher must not offer to play a sister reply')
+  } finally {
+    globalThis.fetch = savedFetch
+    globalThis.setTimeout = savedSetTimeout
+    globalThis.clearTimeout = savedClearTimeout
   }
 })
 
