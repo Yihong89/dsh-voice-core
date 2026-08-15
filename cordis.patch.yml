@@ -1,7 +1,13 @@
-# dsh-voice-core bundle patch — INTENTIONALLY EMPTY.
+# dsh-voice-core bundle patch — activates a tiny profile-wide boot row.
 #
-# The voice engine never activates profile-wide: it is a SHARED LIBRARY that
-# consumer plugins (dsh-teacher, dsh-sister) import and compose into their own
-# apply() — either directly (host ESM import) or via their own bundle row.
-# No profile-level insert is needed here.
-[]
+# The voice engine is a SHARED LIBRARY: consumer plugins (dsh-teacher,
+# dsh-sister) import it on the host (applyVoice) and compose it on the client
+# (createVoiceClient). For the client side, consumer bundles
+# require('dsh-voice-core') — which only resolves if this bundle's client
+# factory is REGISTERED in the browser, and that requires this bundle to have
+# a loader entry. The row below (name = the package name) activates the core's
+# main entry (registers voice/* event types, adds no tools) so its client
+# bundle joins the boot graph.
+- insert:
+    - id: dsh-voice-core
+      name: dsh-voice-core

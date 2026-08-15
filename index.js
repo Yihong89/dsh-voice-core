@@ -41,6 +41,19 @@ export const VOICE_NAME = 'dsh-voice-core'
 export { DEFAULT_STYLES, DEFAULT_STYLE, DEFAULT_CHEERS }
 export { SPEAK_EVENT, SPOKEN_EVENT, CHEER_EVENT, foldVoiceState, hasOpenTurn } from './lib/fold.js'
 
+/**
+ * Profile-wide boot row (`name: dsh-voice-core`): registers the shared
+ * voice event types so the harness persistence catalog accepts them, and
+ * activates a loader entry so the core's CLIENT bundle joins the boot graph
+ * (consumer clients `require('dsh-voice-core')`). Deliberately adds NO tools,
+ * commands, projections, or scheduler — those only come from `applyVoice`,
+ * which consumer plugins call with their own config.
+ */
+export function apply(ctx) {
+  ctx.on('agent/session-start', () => {})
+  ctx.on('agent/pre-step', async (_arg, next) => next())
+}
+
 export const TICK_MS = 30_000
 
 function defaultStateDir() {
