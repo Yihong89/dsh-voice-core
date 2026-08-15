@@ -16,7 +16,13 @@ function loadBundle() {
   let captured = null
   const reactStub = {
     createElement: (type, props, ...children) => ({ type, props, children }),
-    useState: (init) => [init, () => {}],
+    // useEffect runs synchronously (below), so a setter that mutates the
+    // same boxed array in place is enough to observe effect-driven state
+    // updates within one component call — no fiber/re-render needed.
+    useState: (init) => {
+      const box = [init, (next) => { box[0] = typeof next === 'function' ? next(box[0]) : next }]
+      return box
+    },
     useEffect: (fn) => { fn() },
     useRef: (init) => ({ current: init }),
   }
@@ -199,6 +205,60 @@ test('switching sessions discards audio still in flight for the session left beh
     globalThis.fetch = savedFetch
   }
   assert.deepEqual(played, [], 'session-1 audio must not play after switching to session 2')
+})
+
+test('a preset\'s CheerChip does not display a cheer fired in another preset\'s session', () => {
+  // store.cheer is shared by every mounted preset's CheerChip (they all
+  // subscribe to the same module-level store and render at the same fixed
+  // screen position). A sister-session cheer must not show up in teacher's
+  // chip under teacher's own title.
+  const { moduleObj } = loadBundle()
+  const { slots, entries } = mockSlots()
+  const sisterPlugin = moduleObj.createVoiceClient({
+    presetName: 'sister', ttsPath: '/dsh-sister/tts', cheerTitle: '💛 Sister says…',
+    styles: { paimon: { label: '派蒙', instruct: 'x' } }, defaultStyle: 'paimon',
+  })
+  const teacherPlugin = moduleObj.createVoiceClient({
+    presetName: 'teacher', ttsPath: '/dsh-teacher/tts', cheerTitle: '💛 Teacher says…',
+    styles: { onee: { label: '御姐', instruct: 'x' } }, defaultStyle: 'onee',
+  })
+  sisterPlugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  teacherPlugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+
+  const speakToggleById = (id) => entries.filter((e) => e.slot === 'conversation.input.right' && e.register().opts.id === id)[0].register().component
+  const cheerChipById = (id) => entries.filter((e) => e.slot === 'shell.overlay' && e.register().opts.id === id)[0].register().component
+  const sisterSpeakToggle = speakToggleById('dsh-voice-sister-speak')
+  const teacherSpeakToggle = speakToggleById('dsh-voice-teacher-speak')
+  const sisterCheerChip = cheerChipById('dsh-voice-sister-cheer-chip')
+  const teacherCheerChip = cheerChipById('dsh-voice-teacher-cheer-chip')
+
+  // CheerChip's auto-hide uses a real 9s setTimeout; stub it so the test
+  // doesn't block on a live timer (its cleanup never runs — the React stub
+  // ignores useEffect's returned disposer).
+  const savedSetTimeout = globalThis.setTimeout
+  const savedClearTimeout = globalThis.clearTimeout
+  globalThis.setTimeout = () => 0
+  globalThis.clearTimeout = () => {}
+  try {
+    const state = { byId: { s1: { agentPreset: 'sister' } } }
+    const props = {
+      sessionId: 's1',
+      useSessions: (sel) => sel(state),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: { seq: 1, text: '嗨嗨～你来啦！' } }),
+      session: { nodes: [], chat: { order: [], nodes: {} } },
+    }
+    // Both mounted preset instances see the same active (sister) session —
+    // exactly like the real page, where there's one active session and every
+    // preset's plugin is mounted globally.
+    sisterSpeakToggle(props)
+    teacherSpeakToggle(props)
+
+    assert.notEqual(sisterCheerChip(), null, 'sister CheerChip should show its own cheer')
+    assert.equal(teacherCheerChip(), null, 'teacher CheerChip must not show a sister-session cheer')
+  } finally {
+    globalThis.setTimeout = savedSetTimeout
+    globalThis.clearTimeout = savedClearTimeout
+  }
 })
 
 test('_test helpers extract assistant text by kind', () => {
