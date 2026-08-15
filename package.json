@@ -15,6 +15,7 @@
     "./lib/fold.js": "./lib/fold.js",
     "./lib/voice-projection.js": "./lib/voice-projection.js",
     "./lib/voice.js": "./lib/voice.js",
+    "./lib/register-events.js": "./lib/register-events.js",
     "./package.json": "./package.json"
   },
   "license": "MIT",
