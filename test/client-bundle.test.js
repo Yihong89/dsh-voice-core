@@ -253,6 +253,76 @@ test('speakBrowser aborts an older in-flight request when a newer one arrives', 
   assert.equal(fetchCalls[1].signal.aborted, false, 'the newest request must still be active')
 })
 
+test('a newer speak request stops and clears audio already queued from an earlier one in the same turn', async () => {
+  // e.g. the cheer tool's short intro and the full auto-read reply for the
+  // SAME assistant turn are two independent speakBrowser calls, each with
+  // its own dedup tracking, unaware of each other. If both finish
+  // generating, they must not play back-to-back ("so many sentences") -
+  // the newer one should stop/clear the earlier one immediately.
+  const { moduleObj } = loadBundle()
+  const plugin = moduleObj.createVoiceClient({
+    presetName: 'sister',
+    ttsPath: '/dsh-sister/tts',
+    styles: { paimon: { label: '派蒙', instruct: 'x' } },
+    defaultStyle: 'paimon',
+  })
+  const { slots, entries } = mockSlots()
+  plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
+
+  const events = []
+  class FakeAudio {
+    constructor(url) { this.url = url }
+    play() { events.push(['play', this.url]); return Promise.resolve() }
+    pause() { events.push(['pause', this.url]) }
+  }
+  const savedAudio = globalThis.Audio
+  const savedURL = globalThis.URL
+  const savedFetch = globalThis.fetch
+  globalThis.Audio = FakeAudio
+  globalThis.URL = { createObjectURL: (blob) => 'blob:' + blob.id, revokeObjectURL: () => {} }
+  const state = { byId: { s1: { agentPreset: 'sister' } } }
+
+  try {
+    // First speak (e.g. the cheer's short intro) resolves and starts playing.
+    globalThis.fetch = () => Promise.resolve({ ok: true, blob: () => Promise.resolve({ id: 'cheer-audio' }) })
+    SpeakToggle({
+      sessionId: 's1',
+      useSessions: (sel) => sel(state),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 1, text: 'cheer intro' }, lastCheer: null }),
+      session: { nodes: [], chat: { order: [], nodes: {} } },
+    })
+    await Promise.resolve().then(() => {}).then(() => {}).then(() => {})
+    assert.deepEqual(events, [['play', 'blob:cheer-audio']])
+
+    // Second speak (the full auto-read reply for the SAME turn) fires next.
+    globalThis.fetch = () => Promise.resolve({ ok: true, blob: () => Promise.resolve({ id: 'reply-audio' }) })
+    SpeakToggle({
+      sessionId: 's1',
+      useSessions: (sel) => sel(state),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 2, text: 'full reply text' }, lastCheer: null }),
+      session: { nodes: [], chat: { order: [], nodes: {} } },
+    })
+    // The cheer clip is stopped immediately, before the reply's own audio
+    // is even ready — it does not get to keep playing to completion.
+    assert.ok(
+      events.some((e) => e[0] === 'pause' && e[1] === 'blob:cheer-audio'),
+      'the earlier cheer clip is stopped, not left to finish playing',
+    )
+
+    await Promise.resolve().then(() => {}).then(() => {}).then(() => {})
+    assert.deepEqual(
+      events.filter((e) => e[0] === 'play'),
+      [['play', 'blob:cheer-audio'], ['play', 'blob:reply-audio']],
+      'the reply eventually plays once ready',
+    )
+  } finally {
+    globalThis.Audio = savedAudio
+    globalThis.URL = savedURL
+    globalThis.fetch = savedFetch
+  }
+})
+
 test('speakBrowser gives up after 5s so a stuck request cannot block whatever comes after it', () => {
   const { moduleObj } = loadBundle()
   const plugin = moduleObj.createVoiceClient({
