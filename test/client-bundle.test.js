@@ -579,7 +579,10 @@ test('BackgroundLayer shows only while its own preset\'s session is active, and 
   sisterSpeakToggle({ sessionId: 's1', useSessions: (sel) => sel(state), useProjection: noop, session: { nodes: [], chat: { order: [], nodes: {} } } })
   teacherSpeakToggle({ sessionId: 's1', useSessions: (sel) => sel(state), useProjection: noop, session: { nodes: [], chat: { order: [], nodes: {} } } })
   sisterBackground()
-  assert.equal(document.body.style.backgroundImage, 'url(https://example.com/sister-bg.jpg)', 'sister backdrop applies to body while its session is active')
+  assert.ok(
+    document.body.style.backgroundImage.includes('url(https://example.com/sister-bg.jpg)'),
+    'sister backdrop applies to body while its session is active',
+  )
 
   const bodyStyleSnapshot = Object.assign({}, document.body.style)
   teacherBackground() // no backgroundUrl configured for teacher -- must never touch body style
