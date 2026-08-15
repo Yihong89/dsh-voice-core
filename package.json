@@ -1,0 +1,49 @@
+{
+  "name": "dsh-voice-core",
+  "version": "0.1.0",
+  "description": "Shared voice engine for dsh companion plugins (dsh-teacher, dsh-sister): Qwen3-TTS proxy, audio-queue playback, auto-read of assistant replies, speak/cheer tools, voice-style presets, and the daily greeting scheduler. Consumers compose it via a preset row and configure the voice style (e.g. 御姐 / 派蒙).",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./register-events": {
+      "default": "./lib/register-events.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "test": "node --test 'test/*.test.js'"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "tts",
+    "qwen3-tts",
+    "voice",
+    "companion"
+  ],
+  "dependencies": {
+    "zod": "^4.0.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  }
+}

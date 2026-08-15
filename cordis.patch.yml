@@ -1,0 +1,7 @@
+# dsh-voice-core bundle patch — INTENTIONALLY EMPTY.
+#
+# The voice engine never activates profile-wide: it is a SHARED LIBRARY that
+# consumer plugins (dsh-teacher, dsh-sister) import and compose into their own
+# apply() — either directly (host ESM import) or via their own bundle row.
+# No profile-level insert is needed here.
+[]
