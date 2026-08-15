@@ -116,7 +116,7 @@ test('createVoiceClient registers speak toggle, cheer chip, and style picker', (
   assert.equal(right.length, 1)
   assert.equal(right[0].register().opts.id, 'dsh-voice-sister-speak')
   const overlays = entries.filter((e) => e.slot === 'shell.overlay').map((e) => e.register().opts.id).sort()
-  assert.deepEqual(overlays, ['dsh-voice-sister-cheer-chip', 'dsh-voice-sister-hear-full', 'dsh-voice-sister-style-picker'])
+  assert.deepEqual(overlays, ['dsh-voice-sister-background', 'dsh-voice-sister-cheer-chip', 'dsh-voice-sister-hear-full', 'dsh-voice-sister-style-picker'])
 })
 
 test('single-style config omits the picker button (no choice to make)', () => {
@@ -541,6 +541,44 @@ test('a preset\'s CheerChip does not display a cheer fired in another preset\'s 
     globalThis.setTimeout = savedSetTimeout
     globalThis.clearTimeout = savedClearTimeout
   }
+})
+
+test('BackgroundLayer shows only while its own preset\'s session is active, and only if configured', () => {
+  const { moduleObj } = loadBundle()
+  const { slots, entries } = mockSlots()
+  const sisterPlugin = moduleObj.createVoiceClient({
+    presetName: 'sister', ttsPath: '/dsh-sister/tts', backgroundUrl: 'https://example.com/sister-bg.jpg',
+    styles: { paimon: { label: '派蒙', instruct: 'x' } }, defaultStyle: 'paimon',
+  })
+  const teacherPlugin = moduleObj.createVoiceClient({
+    presetName: 'teacher', ttsPath: '/dsh-teacher/tts', // no backgroundUrl -- keeps the host default
+    styles: { onee: { label: '御姐', instruct: 'x' } }, defaultStyle: 'onee',
+  })
+  sisterPlugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  teacherPlugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+
+  const speakToggleById = (id) => entries.filter((e) => e.slot === 'conversation.input.right' && e.register().opts.id === id)[0].register().component
+  const backgroundById = (id) => entries.filter((e) => e.slot === 'shell.overlay' && e.register().opts.id === id)[0].register().component
+  const sisterSpeakToggle = speakToggleById('dsh-voice-sister-speak')
+  const teacherSpeakToggle = speakToggleById('dsh-voice-teacher-speak')
+  const sisterBackground = backgroundById('dsh-voice-sister-background')
+  const teacherBackground = backgroundById('dsh-voice-teacher-background')
+
+  const state = { byId: { s1: { agentPreset: 'sister' }, s2: { agentPreset: 'teacher' } } }
+  const noop = () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null })
+
+  // Sister session active: sister's backdrop shows, teacher's (unconfigured) does not.
+  sisterSpeakToggle({ sessionId: 's1', useSessions: (sel) => sel(state), useProjection: noop, session: { nodes: [], chat: { order: [], nodes: {} } } })
+  teacherSpeakToggle({ sessionId: 's1', useSessions: (sel) => sel(state), useProjection: noop, session: { nodes: [], chat: { order: [], nodes: {} } } })
+  const sisterTree = sisterBackground()
+  assert.ok(sisterTree !== null, 'sister backdrop shows while the sister session is active')
+  assert.equal(sisterTree.props.style.backgroundImage, 'url(https://example.com/sister-bg.jpg)')
+  assert.equal(teacherBackground(), null, 'teacher has no backgroundUrl configured, so nothing renders')
+
+  // Switch to teacher's session: sister's backdrop must disappear (not linger).
+  sisterSpeakToggle({ sessionId: 's2', useSessions: (sel) => sel(state), useProjection: noop, session: { nodes: [], chat: { order: [], nodes: {} } } })
+  teacherSpeakToggle({ sessionId: 's2', useSessions: (sel) => sel(state), useProjection: noop, session: { nodes: [], chat: { order: [], nodes: {} } } })
+  assert.equal(sisterBackground(), null, 'sister backdrop must not linger once the teacher session is active')
 })
 
 test('truncateForSpeech caps text length so one long reply cannot monopolize the TTS queue', () => {
