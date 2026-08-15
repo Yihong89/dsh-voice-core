@@ -38,7 +38,7 @@ function loadBundle() {
   // shell.overlay's own elevated stacking context defeats any z-index a
   // child of it could use to sit behind the app instead of on top of it.
   // Minimal stub so that effect has somewhere to write.
-  globalThis.document = { body: { style: {} } }
+  globalThis.document = { body: { style: {} }, getElementById: () => null }
   // This harness never invokes a useEffect's returned cleanup (there is no
   // real unmount/reconciliation here — each test just calls a component as
   // a plain function), so any code that starts a setInterval would leak a
