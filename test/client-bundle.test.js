@@ -261,6 +261,58 @@ test('a preset\'s CheerChip does not display a cheer fired in another preset\'s 
   }
 })
 
+test('truncateForSpeech caps text length so one long reply cannot monopolize the TTS queue', () => {
+  const { moduleObj } = loadBundle()
+  const { truncateForSpeech } = moduleObj._test
+
+  const short = '嗨嗨～你来啦！'
+  assert.equal(truncateForSpeech(short), short, 'text under the limit is untouched')
+
+  // A boundary well past 40% of the window: cut there, no ellipsis.
+  const withBoundary = 'A'.repeat(80) + '. ' + 'B'.repeat(80)
+  const cut = truncateForSpeech(withBoundary, 100)
+  assert.ok(cut.length <= 82, 'cuts at the sentence boundary, not mid-sentence')
+  assert.ok(cut.endsWith('.'), 'keeps the boundary punctuation')
+  assert.ok(!cut.includes('B'), 'drops everything after the boundary')
+
+  // No boundary within the window at all: hard cut + ellipsis.
+  const noBoundary = 'C'.repeat(300)
+  const hardCut = truncateForSpeech(noBoundary, 100)
+  assert.equal(hardCut, 'C'.repeat(100) + '…')
+})
+
+test('speakBrowser sends truncated text to the TTS endpoint for a very long reply', () => {
+  const { moduleObj } = loadBundle()
+  const plugin = moduleObj.createVoiceClient({
+    presetName: 'teacher',
+    ttsPath: '/dsh-teacher/tts',
+    styles: { onee: { label: '御姐', instruct: 'x' } },
+    defaultStyle: 'onee',
+  })
+  const { slots, entries } = mockSlots()
+  plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
+
+  const longReply = '第一句话说明背景信息。'.repeat(30) // way past MAX_SPEAK_CHARS
+  const calls = []
+  const savedFetch = globalThis.fetch
+  globalThis.fetch = (url) => { calls.push(url); return new Promise(() => {}) }
+  try {
+    SpeakToggle({
+      sessionId: 's1',
+      useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'teacher' } } }),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: { seq: 1, text: longReply }, lastCheer: null }),
+      session: { nodes: [], chat: { order: [], nodes: {} } },
+    })
+  } finally {
+    globalThis.fetch = savedFetch
+  }
+  assert.equal(calls.length, 1)
+  const sentText = decodeURIComponent(calls[0].match(/text=([^&]*)/)[1])
+  assert.ok(sentText.length < longReply.length, 'the full reply must not be sent verbatim to TTS')
+  assert.ok(sentText.length <= 151, 'sent text stays within the truncation cap (+ellipsis)')
+})
+
 test('_test helpers extract assistant text by kind', () => {
   const { moduleObj } = loadBundle()
   const { assistantNodeText, latestAssistantText, speakable } = moduleObj._test
