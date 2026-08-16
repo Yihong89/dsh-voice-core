@@ -708,6 +708,104 @@ test('a cheer fires without generating audio; only the assistant\'s actual reply
   assert.equal(calls.length, 0, 'the cheer text alone must not reach TTS')
 })
 
+test('a cheer matching the pre-baked manifest plays a static clip, never touching the TTS endpoint', async () => {
+  const { moduleObj } = loadBundle()
+  const plugin = moduleObj.createVoiceClient({
+    presetName: 'sister',
+    ttsPath: '/dsh-sister/tts',
+    styles: { paimon: { label: '派蒙', instruct: 'x' } },
+    defaultStyle: 'paimon',
+    cheerAudioManifestUrl: '/dsh-sister/cheer-audio/manifest.json',
+  })
+  const { slots, entries } = mockSlots()
+  plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
+
+  const ttsCalls = []
+  const played = []
+  class FakeAudio {
+    constructor(url) { this.url = url }
+    play() { played.push(this.url); return Promise.resolve() }
+    pause() {}
+  }
+  const savedAudio = globalThis.Audio
+  const savedURL = globalThis.URL
+  const savedFetch = globalThis.fetch
+  globalThis.Audio = FakeAudio
+  globalThis.URL = { createObjectURL: (blob) => 'blob:' + blob.id, revokeObjectURL: () => {} }
+  globalThis.fetch = (url) => {
+    if (String(url) === '/dsh-sister/cheer-audio/manifest.json') {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ '晚安呀，做个好梦！': '/dsh-sister/cheer-audio/03.m4a' }) })
+    }
+    ttsCalls.push(url)
+    return new Promise(() => {})
+  }
+  try {
+    SpeakToggle({
+      sessionId: 's1',
+      useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: { seq: 1, text: '晚安呀，做个好梦！' } }),
+      session: { nodes: [], chat: { order: [], nodes: {} } },
+    })
+    // loadCheerManifest's fetch().then() resolves on a later microtask.
+    await Promise.resolve().then(() => {}).then(() => {}).then(() => {}).then(() => {}).then(() => {}).then(() => {})
+  } finally {
+    globalThis.Audio = savedAudio
+    globalThis.URL = savedURL
+    globalThis.fetch = savedFetch
+  }
+  assert.deepEqual(played, ['/dsh-sister/cheer-audio/03.m4a'], 'plays the pre-baked clip for the matching cheer text')
+  assert.equal(ttsCalls.length, 0, 'a manifest-matched cheer never reaches the TTS endpoint')
+})
+
+test('a cheer NOT in the pre-baked manifest stays silent (no playClip, no live TTS)', async () => {
+  const { moduleObj } = loadBundle()
+  const plugin = moduleObj.createVoiceClient({
+    presetName: 'sister',
+    ttsPath: '/dsh-sister/tts',
+    styles: { paimon: { label: '派蒙', instruct: 'x' } },
+    defaultStyle: 'paimon',
+    cheerAudioManifestUrl: '/dsh-sister/cheer-audio/manifest.json',
+  })
+  const { slots, entries } = mockSlots()
+  plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
+
+  const ttsCalls = []
+  const played = []
+  class FakeAudio {
+    constructor(url) { this.url = url }
+    play() { played.push(this.url); return Promise.resolve() }
+    pause() {}
+  }
+  const savedAudio = globalThis.Audio
+  const savedFetch = globalThis.fetch
+  globalThis.Audio = FakeAudio
+  globalThis.fetch = (url) => {
+    if (String(url) === '/dsh-sister/cheer-audio/manifest.json') {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ '晚安呀，做个好梦！': '/dsh-sister/cheer-audio/03.m4a' }) })
+    }
+    ttsCalls.push(url)
+    return new Promise(() => {})
+  }
+  try {
+    SpeakToggle({
+      sessionId: 's1',
+      useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
+      // A custom /cheer text (or the scheduler's model-composed daily
+      // greeting) never matches the fixed bank exactly.
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: { seq: 1, text: '今天股票大涨，恭喜发财！' } }),
+      session: { nodes: [], chat: { order: [], nodes: {} } },
+    })
+    await Promise.resolve().then(() => {}).then(() => {}).then(() => {}).then(() => {}).then(() => {}).then(() => {})
+  } finally {
+    globalThis.Audio = savedAudio
+    globalThis.fetch = savedFetch
+  }
+  assert.deepEqual(played, [], 'no pre-baked clip matches, so nothing plays')
+  assert.equal(ttsCalls.length, 0, 'a non-matching cheer still never reaches the TTS endpoint')
+})
+
 test('watchQueue polls the health route and getQueueStatus reflects it; ref-counted across multiple watchers', async () => {
   const { moduleObj } = loadBundle()
   const { voice } = moduleObj._test
