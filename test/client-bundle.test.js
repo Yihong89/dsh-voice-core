@@ -80,6 +80,21 @@ function assistantSession(seq, text) {
   return { nodes: [{ kind: 'assistant', seq, blocks: [{ kind: 'text', text }] }], chat: { order: [], nodes: {} } }
 }
 
+function emptySession() {
+  return { nodes: [], chat: { order: [], nodes: {} } }
+}
+
+/** Simulates the real render sequence for "a session that was already being
+ * viewed just got a new reply": one call with no assistant message yet
+ * (establishes the auto-read baseline for this sessionId), then the call
+ * with the reply (the one that should actually trigger voice.request()).
+ * Without the first call, SpeakToggle can't distinguish this from "just
+ * switched into a session that already had an old reply sitting there" —
+ * see client.js's lastSeenSessionIdRef comment. */
+function primeThenReply(SpeakToggle, baseProps) {
+  SpeakToggle({ ...baseProps, session: emptySession() })
+}
+
 function mockSlots() {
   const entries = []
   const slots = {
@@ -207,6 +222,54 @@ test('a preset\'s SpeakToggle does not auto-read a session belonging to another 
   assert.equal(calls.length, 0, 'teacher SpeakToggle must not fetch TTS for a sister session reply')
 })
 
+test('switching into (or reloading onto) a session that already has a reply does not auto-read old history', () => {
+  // Regression: a session with an old reply already sitting in it (viewed
+  // 2+ hours ago, say) got read aloud again the instant SpeakToggle first
+  // evaluated it -- e.g. after a page reload, or navigating away and back.
+  // The cursor only guards "the exact session I last wrote a cursor for",
+  // so the FIRST time a *different* (or not-yet-tracked) session is seen,
+  // it fell through as if its already-visible reply were brand new.
+  const { moduleObj } = loadBundle()
+  const plugin = moduleObj.createVoiceClient({
+    presetName: 'teacher',
+    ttsPath: '/dsh-teacher/tts',
+    styles: { onee: { label: '御姐', instruct: 'x' } },
+    defaultStyle: 'onee',
+  })
+  const { slots, entries } = mockSlots()
+  plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
+
+  const { FakeEventSource, instances } = makeFakeEventSource()
+  const savedEventSource = globalThis.EventSource
+  globalThis.EventSource = FakeEventSource
+  try {
+    // Simulates opening a page fresh (or switching sessions) straight onto
+    // a session that already has an old reply in it -- no earlier
+    // "empty" render for this sessionId ever happened in this mount.
+    SpeakToggle({
+      sessionId: 'eng-teacher',
+      useSessions: (sel) => sel({ byId: { 'eng-teacher': { agentPreset: 'teacher' } } }),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+      session: assistantSession(42, 'old roaches quiz hint from two hours ago'),
+    })
+    assert.equal(instances.length, 0, 'old history already on screen must never be sent to TTS')
+
+    // A genuinely NEW reply arriving afterward (session content changes
+    // again) must still be auto-read normally -- the fix only suppresses
+    // the FIRST look at a session's pre-existing content, not everything.
+    SpeakToggle({
+      sessionId: 'eng-teacher',
+      useSessions: (sel) => sel({ byId: { 'eng-teacher': { agentPreset: 'teacher' } } }),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+      session: assistantSession(43, 'a brand new reply after the old one'),
+    })
+    assert.equal(instances.length, 1, 'a genuinely new reply in the same session is still auto-read')
+  } finally {
+    globalThis.EventSource = savedEventSource
+  }
+})
+
 test('switching sessions discards audio still in flight for the session left behind', () => {
   // TTS streaming can take a while to deliver its first segment. If the
   // user switches sessions before one arrives, that audio must not play
@@ -238,13 +301,14 @@ test('switching sessions discards audio still in flight for the session left beh
 
   try {
     const state = { byId: { s1: { agentPreset: 'sister' }, s2: { agentPreset: 'sister' } } }
-    // Session s1's reply is auto-read; its stream is still open (slow generation).
-    SpeakToggle({
+    const s1Props = {
       sessionId: 's1',
       useSessions: (sel) => sel(state),
       useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
-      session: assistantSession(1, 'hello from session one'),
-    })
+    }
+    primeThenReply(SpeakToggle, s1Props) // establish s1 as already-viewed-and-empty
+    // Session s1's reply is auto-read; its stream is still open (slow generation).
+    SpeakToggle({ ...s1Props, session: assistantSession(1, 'hello from session one') })
     const s1Stream = instances[0]
     // User switches to s2 before a segment arrives.
     SpeakToggle({
@@ -304,13 +368,14 @@ test('switching to a different preset\'s session cancels a still-pending auto-re
 
   try {
     const state = { byId: { s1: { agentPreset: 'sister' }, s2: { agentPreset: 'teacher' } } }
-    // Sister session s1's reply lands; its 1s debounce is scheduled but not fired yet.
-    sisterSpeakToggle({
+    const s1Props = {
       sessionId: 's1',
       useSessions: (sel) => sel(state),
       useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
-      session: assistantSession(1, 'hello from sister session'),
-    })
+    }
+    primeThenReply(sisterSpeakToggle, s1Props) // establish s1 as already-viewed-and-empty
+    // Sister session s1's reply lands; its 1s debounce is scheduled but not fired yet.
+    sisterSpeakToggle({ ...s1Props, session: assistantSession(1, 'hello from sister session') })
     assert.equal(pendingTimers.size, 1, 'sister schedules its debounce')
 
     // User switches to s2, a TEACHER session -- sister's SpeakToggle re-renders
@@ -368,18 +433,14 @@ test('speakBrowser closes an older in-flight stream when a newer one arrives', (
   globalThis.clearTimeout = () => {}
   try {
     const state = { byId: { s1: { agentPreset: 'sister' } } }
-    SpeakToggle({
+    const s1Props = {
       sessionId: 's1',
       useSessions: (sel) => sel(state),
       useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
-      session: assistantSession(1, 'old message'),
-    })
-    SpeakToggle({
-      sessionId: 's1',
-      useSessions: (sel) => sel(state),
-      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
-      session: assistantSession(2, 'new message'),
-    })
+    }
+    primeThenReply(SpeakToggle, s1Props) // establish s1 as already-viewed-and-empty
+    SpeakToggle({ ...s1Props, session: assistantSession(1, 'old message') })
+    SpeakToggle({ ...s1Props, session: assistantSession(2, 'new message') })
   } finally {
     globalThis.EventSource = savedEventSource
     globalThis.setTimeout = savedSetTimeout
@@ -422,26 +483,22 @@ test('a newer speak request stops and clears audio already queued from an earlie
   globalThis.URL = { createObjectURL: () => 'blob:' + (nextBlobId++), revokeObjectURL: () => {} }
   globalThis.EventSource = FakeEventSource
   const state = { byId: { s1: { agentPreset: 'sister' } } }
+  const s1Props = {
+    sessionId: 's1',
+    useSessions: (sel) => sel(state),
+    useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+  }
 
   try {
+    primeThenReply(SpeakToggle, s1Props) // establish s1 as already-viewed-and-empty
     // First auto-read (partial streamed text): its stream delivers one
     // final segment and starts playing.
-    SpeakToggle({
-      sessionId: 's1',
-      useSessions: (sel) => sel(state),
-      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
-      session: assistantSession(1, 'partial reply'),
-    })
+    SpeakToggle({ ...s1Props, session: assistantSession(1, 'partial reply') })
     instances[0].onmessage({ data: JSON.stringify({ audio: FAKE_AUDIO_B64, isFinal: true }) })
     assert.deepEqual(events, [['play', 'blob:0']])
 
     // Second auto-read (the final, longer text of the SAME message) fires next.
-    SpeakToggle({
-      sessionId: 's1',
-      useSessions: (sel) => sel(state),
-      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
-      session: assistantSession(1, 'partial reply, now complete'),
-    })
+    SpeakToggle({ ...s1Props, session: assistantSession(1, 'partial reply, now complete') })
     // The partial clip is stopped immediately, before the final reply's own
     // audio is even ready — it does not get to keep playing to completion.
     assert.ok(
@@ -490,12 +547,13 @@ test('speakBrowser closes a stream that goes idle for 15s so a stuck one cannot 
   }
   globalThis.EventSource = FakeEventSource
   try {
-    SpeakToggle({
+    const s1Props = {
       sessionId: 's1',
       useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
       useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
-      session: assistantSession(1, 'hello'),
-    })
+    }
+    primeThenReply(SpeakToggle, s1Props) // establish s1 as already-viewed-and-empty
+    SpeakToggle({ ...s1Props, session: assistantSession(1, 'hello') })
     assert.equal(capturedDelay, 15000, 'gives up after 15 seconds of silence')
     assert.equal(instances[0].closed, false)
     idleCallback() // simulate 15s elapsing with no segment received
@@ -523,12 +581,13 @@ test('auto-read speaks the FULL reply through one stream (no truncation, no clie
   const savedEventSource = globalThis.EventSource
   globalThis.EventSource = FakeEventSource
   try {
-    SpeakToggle({
+    const s1Props = {
       sessionId: 's1',
       useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
       useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
-      session: assistantSession(1, longReply),
-    })
+    }
+    primeThenReply(SpeakToggle, s1Props) // establish s1 as already-viewed-and-empty
+    SpeakToggle({ ...s1Props, session: assistantSession(1, longReply) })
     assert.equal(instances.length, 1, 'exactly one streaming connection for the whole reply')
     const sentText = decodeURIComponent(instances[0].url.match(/text=([^&]*)/)[1])
     assert.equal(sentText, longReply, 'the full, untruncated text is sent -- nothing split or cut client-side')
@@ -566,12 +625,13 @@ test('streamed segments queue and play in order as they arrive, before the strea
   globalThis.EventSource = FakeEventSource
 
   try {
-    SpeakToggle({
+    const s1Props = {
       sessionId: 's1',
       useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
       useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
-      session: assistantSession(1, 'a long reply spoken as several segments'),
-    })
+    }
+    primeThenReply(SpeakToggle, s1Props) // establish s1 as already-viewed-and-empty
+    SpeakToggle({ ...s1Props, session: assistantSession(1, 'a long reply spoken as several segments') })
     const es = instances[0]
 
     // Three non-final segments arrive back to back (the server keeps
@@ -821,9 +881,14 @@ test('a matching cheer clip never interrupts an in-flight live reply from the sa
   }
   globalThis.EventSource = FakeEventSource // the reply's stream never emits -- still "in flight"
   try {
-    SpeakToggle({
+    const s1Props = {
       sessionId: 's1',
       useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
+    }
+    // establish s1 as already-viewed-and-empty
+    SpeakToggle({ ...s1Props, useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }), session: emptySession() })
+    SpeakToggle({
+      ...s1Props,
       useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: { seq: 1, text: '晚安呀，做个好梦！' } }),
       // A real assistant reply this turn -- auto-read's 1000ms debounce
       // (stubbed to fire synchronously) calls voice.request() for it
