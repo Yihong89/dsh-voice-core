@@ -28,10 +28,12 @@ function loadBundle() {
   }
   globalThis.window = {
     __ModuleLoader__: { load: (def) => { captured = def } },
-    // speakBrowser guards on `typeof window.fetch === 'function'` but then
-    // calls the bare `fetch(...)` — which resolves via globalThis, not this
-    // stub object. Keep this truthy so the guard passes; tests that need to
-    // observe/intercept the actual call must stub globalThis.fetch instead.
+    // request() guards on `typeof window.EventSource === 'function'` but
+    // then calls the bare `new EventSource(...)` — which resolves via
+    // globalThis, not this stub object. Keep this truthy so the guard
+    // passes; tests that need to observe/intercept the actual stream must
+    // stub globalThis.EventSource instead (see makeFakeEventSource below).
+    EventSource: function () {},
     fetch: () => {},
   }
   // BackgroundLayer sets document.body.style directly (see client.js) since
@@ -87,6 +89,27 @@ function mockSlots() {
   return { slots, entries }
 }
 
+/** Minimal EventSource stub for exercising speakStream(): each `new
+ * EventSource(url)` call is recorded in `instances` (in creation order) so
+ * a test can grab the latest one and manually fire `.onmessage({data})` /
+ * `.onerror()` to simulate SSE frames, and check `.closed` afterward. */
+function makeFakeEventSource() {
+  const instances = []
+  function FakeEventSource(url) {
+    this.url = url
+    this.closed = false
+    this.onmessage = null
+    this.onerror = null
+    instances.push(this)
+  }
+  FakeEventSource.prototype.close = function () { this.closed = true }
+  return { FakeEventSource, instances }
+}
+
+/** A valid (content doesn't matter -- tests check play order/count, not
+ * decoded audio) base64 payload for an SSE `data.audio` field. */
+const FAKE_AUDIO_B64 = 'eA=='
+
 test('client bundle exports createVoiceClient', () => {
   const { moduleObj } = loadBundle()
   assert.equal(moduleObj.name, 'dsh-voice-core')
@@ -121,7 +144,7 @@ test('createVoiceClient registers speak toggle and style picker', () => {
   assert.equal(right.length, 1)
   assert.equal(right[0].register().opts.id, 'dsh-voice-sister-speak')
   const overlays = entries.filter((e) => e.slot === 'shell.overlay').map((e) => e.register().opts.id).sort()
-  assert.deepEqual(overlays, ['dsh-voice-sister-background', 'dsh-voice-sister-hear-full', 'dsh-voice-sister-style-picker'])
+  assert.deepEqual(overlays, ['dsh-voice-sister-background', 'dsh-voice-sister-style-picker'])
 })
 
 test('single-style config omits the picker button (no choice to make)', () => {
@@ -184,10 +207,10 @@ test('a preset\'s SpeakToggle does not auto-read a session belonging to another 
   assert.equal(calls.length, 0, 'teacher SpeakToggle must not fetch TTS for a sister session reply')
 })
 
-test('switching sessions discards audio still in flight for the session left behind', async () => {
-  // TTS generation can take tens of seconds. If the user switches sessions
-  // before a queued fetch resolves, that audio must not play into the new
-  // session — it belongs to the session that requested it.
+test('switching sessions discards audio still in flight for the session left behind', () => {
+  // TTS streaming can take a while to deliver its first segment. If the
+  // user switches sessions before one arrives, that audio must not play
+  // into the new session — it belongs to the session that requested it.
   const { moduleObj } = loadBundle()
   const plugin = moduleObj.createVoiceClient({
     presetName: 'sister',
@@ -207,35 +230,36 @@ test('switching sessions discards audio still in flight for the session left beh
   }
   const savedAudio = globalThis.Audio
   const savedURL = globalThis.URL
-  const savedFetch = globalThis.fetch
+  const { FakeEventSource, instances } = makeFakeEventSource()
+  const savedEventSource = globalThis.EventSource
   globalThis.Audio = FakeAudio
-  globalThis.URL = { createObjectURL: (blob) => 'blob:' + blob.id, revokeObjectURL: () => {} }
-  let resolveFetch
-  globalThis.fetch = () => new Promise((resolve) => { resolveFetch = resolve })
+  globalThis.URL = { createObjectURL: () => 'blob:x', revokeObjectURL: () => {} }
+  globalThis.EventSource = FakeEventSource
 
   try {
     const state = { byId: { s1: { agentPreset: 'sister' }, s2: { agentPreset: 'sister' } } }
-    // Session s1's reply is auto-read; its TTS fetch is still pending (slow generation).
+    // Session s1's reply is auto-read; its stream is still open (slow generation).
     SpeakToggle({
       sessionId: 's1',
       useSessions: (sel) => sel(state),
       useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
       session: assistantSession(1, 'hello from session one'),
     })
-    // User switches to s2 before the fetch resolves.
+    const s1Stream = instances[0]
+    // User switches to s2 before a segment arrives.
     SpeakToggle({
       sessionId: 's2',
       useSessions: (sel) => sel(state),
       useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
       session: { nodes: [], chat: { order: [], nodes: {} } },
     })
-    // Now s1's slow TTS generation finally completes.
-    resolveFetch({ ok: true, blob: () => Promise.resolve({ id: 's1-audio' }) })
-    await Promise.resolve().then(() => {}).then(() => {}).then(() => {})
+    assert.ok(s1Stream.closed, 's1 stream is closed on session switch')
+    // Now s1's slow stream finally delivers a segment anyway.
+    s1Stream.onmessage({ data: JSON.stringify({ audio: FAKE_AUDIO_B64, isFinal: true }) })
   } finally {
     globalThis.Audio = savedAudio
     globalThis.URL = savedURL
-    globalThis.fetch = savedFetch
+    globalThis.EventSource = savedEventSource
   }
   assert.deepEqual(played, [], 'session-1 audio must not play after switching to session 2')
 })
@@ -318,7 +342,7 @@ test('switching to a different preset\'s session cancels a still-pending auto-re
   }
 })
 
-test('speakBrowser aborts an older in-flight request when a newer one arrives', () => {
+test('speakBrowser closes an older in-flight stream when a newer one arrives', () => {
   // Only the latest speak/cheer should ever reach TTS: an older reply the
   // conversation has already moved past must not keep occupying the
   // single-worker generation queue behind the newest one.
@@ -333,13 +357,13 @@ test('speakBrowser aborts an older in-flight request when a newer one arrives', 
   plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
   const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
 
-  const fetchCalls = []
-  const savedFetch = globalThis.fetch
+  const { FakeEventSource, instances } = makeFakeEventSource()
+  const savedEventSource = globalThis.EventSource
   const savedSetTimeout = globalThis.setTimeout
   const savedClearTimeout = globalThis.clearTimeout
-  globalThis.fetch = (url, init) => { fetchCalls.push({ url, signal: init.signal }); return new Promise(() => {}) }
+  globalThis.EventSource = FakeEventSource
   // Fire the 1s auto-read debounce (so both calls below actually reach
-  // voice.request) but avoid scheduling a real 5s give-up timer.
+  // voice.request) but avoid scheduling a real idle-watchdog timer.
   globalThis.setTimeout = (fn, ms) => { if (ms === 1000) fn(); return 0 }
   globalThis.clearTimeout = () => {}
   try {
@@ -357,16 +381,16 @@ test('speakBrowser aborts an older in-flight request when a newer one arrives', 
       session: assistantSession(2, 'new message'),
     })
   } finally {
-    globalThis.fetch = savedFetch
+    globalThis.EventSource = savedEventSource
     globalThis.setTimeout = savedSetTimeout
     globalThis.clearTimeout = savedClearTimeout
   }
-  assert.equal(fetchCalls.length, 2)
-  assert.equal(fetchCalls[0].signal.aborted, true, 'the older in-flight request must be aborted')
-  assert.equal(fetchCalls[1].signal.aborted, false, 'the newest request must still be active')
+  assert.equal(instances.length, 2)
+  assert.equal(instances[0].closed, true, 'the older in-flight stream must be closed')
+  assert.equal(instances[1].closed, false, 'the newest stream must still be open')
 })
 
-test('a newer speak request stops and clears audio already queued from an earlier one for the same session', async () => {
+test('a newer speak request stops and clears audio already queued from an earlier one for the same session', () => {
   // e.g. a streaming reply: the auto-read effect can fire once for a
   // partial snapshot and again for the final, longer text of the SAME
   // message (same seq, different text — the dedup check compares both).
@@ -391,25 +415,27 @@ test('a newer speak request stops and clears audio already queued from an earlie
   }
   const savedAudio = globalThis.Audio
   const savedURL = globalThis.URL
-  const savedFetch = globalThis.fetch
+  const { FakeEventSource, instances } = makeFakeEventSource()
+  const savedEventSource = globalThis.EventSource
   globalThis.Audio = FakeAudio
-  globalThis.URL = { createObjectURL: (blob) => 'blob:' + blob.id, revokeObjectURL: () => {} }
+  var nextBlobId = 0
+  globalThis.URL = { createObjectURL: () => 'blob:' + (nextBlobId++), revokeObjectURL: () => {} }
+  globalThis.EventSource = FakeEventSource
   const state = { byId: { s1: { agentPreset: 'sister' } } }
 
   try {
-    // First auto-read (partial streamed text) resolves and starts playing.
-    globalThis.fetch = () => Promise.resolve({ ok: true, blob: () => Promise.resolve({ id: 'partial-audio' }) })
+    // First auto-read (partial streamed text): its stream delivers one
+    // final segment and starts playing.
     SpeakToggle({
       sessionId: 's1',
       useSessions: (sel) => sel(state),
       useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
       session: assistantSession(1, 'partial reply'),
     })
-    await Promise.resolve().then(() => {}).then(() => {}).then(() => {})
-    assert.deepEqual(events, [['play', 'blob:partial-audio']])
+    instances[0].onmessage({ data: JSON.stringify({ audio: FAKE_AUDIO_B64, isFinal: true }) })
+    assert.deepEqual(events, [['play', 'blob:0']])
 
     // Second auto-read (the final, longer text of the SAME message) fires next.
-    globalThis.fetch = () => Promise.resolve({ ok: true, blob: () => Promise.resolve({ id: 'final-audio' }) })
     SpeakToggle({
       sessionId: 's1',
       useSessions: (sel) => sel(state),
@@ -419,24 +445,25 @@ test('a newer speak request stops and clears audio already queued from an earlie
     // The partial clip is stopped immediately, before the final reply's own
     // audio is even ready — it does not get to keep playing to completion.
     assert.ok(
-      events.some((e) => e[0] === 'pause' && e[1] === 'blob:partial-audio'),
+      events.some((e) => e[0] === 'pause' && e[1] === 'blob:0'),
       'the earlier partial clip is stopped, not left to finish playing',
     )
+    assert.equal(instances[0].closed, true, 'the earlier stream is closed too')
 
-    await Promise.resolve().then(() => {}).then(() => {}).then(() => {})
+    instances[1].onmessage({ data: JSON.stringify({ audio: FAKE_AUDIO_B64, isFinal: true }) })
     assert.deepEqual(
       events.filter((e) => e[0] === 'play'),
-      [['play', 'blob:partial-audio'], ['play', 'blob:final-audio']],
+      [['play', 'blob:0'], ['play', 'blob:1']],
       'the final reply eventually plays once ready',
     )
   } finally {
     globalThis.Audio = savedAudio
     globalThis.URL = savedURL
-    globalThis.fetch = savedFetch
+    globalThis.EventSource = savedEventSource
   }
 })
 
-test('speakBrowser gives up after 5s so a stuck request cannot block whatever comes after it', () => {
+test('speakBrowser closes a stream that goes idle for 15s so a stuck one cannot block whatever comes after it', () => {
   const { moduleObj } = loadBundle()
   const plugin = moduleObj.createVoiceClient({
     presetName: 'sister',
@@ -448,20 +475,20 @@ test('speakBrowser gives up after 5s so a stuck request cannot block whatever co
   plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
   const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
 
-  let capturedSignal = null
-  let timeoutCallback = null
+  let idleCallback = null
   let capturedDelay = null
   const savedSetTimeout = globalThis.setTimeout
-  const savedFetch = globalThis.fetch
+  const { FakeEventSource, instances } = makeFakeEventSource()
+  const savedEventSource = globalThis.EventSource
   // Fire the 1s auto-read debounce immediately (so voice.request actually
-  // runs) but capture the request's own give-up timer for manual control.
+  // runs) but capture the stream's idle-watchdog timer for manual control.
   globalThis.setTimeout = (fn, ms) => {
     if (ms === 1000) { fn(); return 0 }
-    timeoutCallback = fn
+    idleCallback = fn
     capturedDelay = ms
     return 0
   }
-  globalThis.fetch = (url, init) => { capturedSignal = init.signal; return new Promise(() => {}) }
+  globalThis.EventSource = FakeEventSource
   try {
     SpeakToggle({
       sessionId: 's1',
@@ -469,17 +496,17 @@ test('speakBrowser gives up after 5s so a stuck request cannot block whatever co
       useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
       session: assistantSession(1, 'hello'),
     })
-    assert.equal(capturedDelay, 5000, 'gives up after 5 seconds')
-    assert.equal(capturedSignal.aborted, false)
-    timeoutCallback() // simulate the 5s elapsing without a response
-    assert.equal(capturedSignal.aborted, true, 'the stuck request is aborted once the timeout fires')
+    assert.equal(capturedDelay, 15000, 'gives up after 15 seconds of silence')
+    assert.equal(instances[0].closed, false)
+    idleCallback() // simulate 15s elapsing with no segment received
+    assert.equal(instances[0].closed, true, 'the stuck stream is closed once the idle watchdog fires')
   } finally {
     globalThis.setTimeout = savedSetTimeout
-    globalThis.fetch = savedFetch
+    globalThis.EventSource = savedEventSource
   }
 })
 
-test('a truncated long reply shows a "hear full reply" chip; clicking it plays the untruncated text', () => {
+test('auto-read speaks the FULL reply through one stream (no truncation, no client-side splitting)', () => {
   const { moduleObj } = loadBundle()
   const plugin = moduleObj.createVoiceClient({
     presetName: 'sister',
@@ -490,16 +517,11 @@ test('a truncated long reply shows a "hear full reply" chip; clicking it plays t
   const { slots, entries } = mockSlots()
   plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
   const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
-  const { component: HearFullChip } = entries.filter((e) => e.slot === 'shell.overlay' && e.register().opts.id === 'dsh-voice-sister-hear-full')[0].register()
 
-  const longReply = '第一句话说明背景信息。'.repeat(30) // way past MAX_SPEAK_CHARS
-  const fetchCalls = []
-  const savedFetch = globalThis.fetch
-  const savedSetTimeout = globalThis.setTimeout
-  const savedClearTimeout = globalThis.clearTimeout
-  globalThis.fetch = (url) => { fetchCalls.push(url); return new Promise(() => {}) }
-  globalThis.setTimeout = (fn, ms) => { if (ms === 1000) fn(); return 0 }
-  globalThis.clearTimeout = () => {}
+  const longReply = '第一句话说明背景信息。'.repeat(30) // long -- would have been truncated under the old design
+  const { FakeEventSource, instances } = makeFakeEventSource()
+  const savedEventSource = globalThis.EventSource
+  globalThis.EventSource = FakeEventSource
   try {
     SpeakToggle({
       sessionId: 's1',
@@ -507,68 +529,75 @@ test('a truncated long reply shows a "hear full reply" chip; clicking it plays t
       useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
       session: assistantSession(1, longReply),
     })
-    assert.equal(fetchCalls.length, 1)
-    const firstSentText = decodeURIComponent(fetchCalls[0].match(/text=([^&]*)/)[1])
-    assert.ok(firstSentText.length < longReply.length, 'the first speak attempt is truncated')
-
-    const chip = HearFullChip()
-    assert.ok(chip !== null, 'the hear-full chip should be visible after truncation')
-    const button = chip.children[0].children[1]
-    assert.equal(button.type, 'button')
-
-    button.props.onClick()
-
-    assert.equal(fetchCalls.length, 2, 'clicking the chip fires a second TTS request')
-    const secondSentText = decodeURIComponent(fetchCalls[1].match(/text=([^&]*)/)[1])
-    assert.equal(secondSentText, longReply, 'the second request sends the full untruncated text')
-    assert.equal(HearFullChip(), null, 'the chip dismisses itself once used')
+    assert.equal(instances.length, 1, 'exactly one streaming connection for the whole reply')
+    const sentText = decodeURIComponent(instances[0].url.match(/text=([^&]*)/)[1])
+    assert.equal(sentText, longReply, 'the full, untruncated text is sent -- nothing split or cut client-side')
   } finally {
-    globalThis.fetch = savedFetch
-    globalThis.setTimeout = savedSetTimeout
-    globalThis.clearTimeout = savedClearTimeout
+    globalThis.EventSource = savedEventSource
   }
 })
 
-test('a preset\'s HearFullChip does not offer to play another preset\'s truncated reply', () => {
+test('streamed segments queue and play in order as they arrive, before the stream even finishes', () => {
   const { moduleObj } = loadBundle()
+  const plugin = moduleObj.createVoiceClient({
+    presetName: 'sister',
+    ttsPath: '/dsh-sister/tts',
+    styles: { paimon: { label: '派蒙', instruct: 'x' } },
+    defaultStyle: 'paimon',
+  })
   const { slots, entries } = mockSlots()
-  const sisterPlugin = moduleObj.createVoiceClient({
-    presetName: 'sister', ttsPath: '/dsh-sister/tts',
-    styles: { paimon: { label: '派蒙', instruct: 'x' } }, defaultStyle: 'paimon',
-  })
-  const teacherPlugin = moduleObj.createVoiceClient({
-    presetName: 'teacher', ttsPath: '/dsh-teacher/tts',
-    styles: { onee: { label: '御姐', instruct: 'x' } }, defaultStyle: 'onee',
-  })
-  sisterPlugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
-  teacherPlugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
 
-  const speakToggleById = (id) => entries.filter((e) => e.slot === 'conversation.input.right' && e.register().opts.id === id)[0].register().component
-  const hearFullChipById = (id) => entries.filter((e) => e.slot === 'shell.overlay' && e.register().opts.id === id)[0].register().component
-  const sisterSpeakToggle = speakToggleById('dsh-voice-sister-speak')
-  const sisterHearFullChip = hearFullChipById('dsh-voice-sister-hear-full')
-  const teacherHearFullChip = hearFullChipById('dsh-voice-teacher-hear-full')
+  const played = []
+  const audioInstances = []
+  class FakeAudio {
+    constructor(url) { this.url = url; audioInstances.push(this) }
+    play() { played.push(this.url); return Promise.resolve() }
+    pause() {}
+  }
+  const savedAudio = globalThis.Audio
+  const savedURL = globalThis.URL
+  const { FakeEventSource, instances } = makeFakeEventSource()
+  const savedEventSource = globalThis.EventSource
+  globalThis.Audio = FakeAudio
+  var nextBlobId = 0
+  globalThis.URL = { createObjectURL: () => 'blob:' + (nextBlobId++), revokeObjectURL: () => {} }
+  globalThis.EventSource = FakeEventSource
 
-  const savedFetch = globalThis.fetch
-  const savedSetTimeout = globalThis.setTimeout
-  const savedClearTimeout = globalThis.clearTimeout
-  globalThis.fetch = () => new Promise(() => {})
-  globalThis.setTimeout = (fn, ms) => { if (ms === 1000) fn(); return 0 }
-  globalThis.clearTimeout = () => {}
   try {
-    const longReply = '第一句话说明背景信息。'.repeat(30)
-    sisterSpeakToggle({
+    SpeakToggle({
       sessionId: 's1',
       useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
       useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
-      session: assistantSession(1, longReply),
+      session: assistantSession(1, 'a long reply spoken as several segments'),
     })
-    assert.notEqual(sisterHearFullChip(), null, 'sister should offer to play its own truncated reply')
-    assert.equal(teacherHearFullChip(), null, 'teacher must not offer to play a sister reply')
+    const es = instances[0]
+
+    // Three non-final segments arrive back to back (the server keeps
+    // generating ahead of playback); only the first one has started
+    // playing so far since FakeAudio never fires onended on its own.
+    es.onmessage({ data: JSON.stringify({ audio: FAKE_AUDIO_B64, isFinal: false }) })
+    es.onmessage({ data: JSON.stringify({ audio: FAKE_AUDIO_B64, isFinal: false }) })
+    es.onmessage({ data: JSON.stringify({ audio: FAKE_AUDIO_B64, isFinal: false }) })
+    assert.deepEqual(played, ['blob:0'], 'only the first segment has started playing so far')
+    assert.equal(es.closed, false, 'stream stays open -- more segments (or isFinal) still to come')
+
+    // Each finishing playback picks up the next queued segment immediately.
+    audioInstances[0].onended()
+    assert.deepEqual(played, ['blob:0', 'blob:1'])
+    audioInstances[1].onended()
+    assert.deepEqual(played, ['blob:0', 'blob:1', 'blob:2'])
+
+    // Final segment arrives and closes the stream once delivered.
+    es.onmessage({ data: JSON.stringify({ audio: FAKE_AUDIO_B64, isFinal: true }) })
+    audioInstances[2].onended()
+    assert.deepEqual(played, ['blob:0', 'blob:1', 'blob:2', 'blob:3'])
+    assert.equal(es.closed, true, 'stream closes itself once the final segment is delivered')
   } finally {
-    globalThis.fetch = savedFetch
-    globalThis.setTimeout = savedSetTimeout
-    globalThis.clearTimeout = savedClearTimeout
+    globalThis.Audio = savedAudio
+    globalThis.URL = savedURL
+    globalThis.EventSource = savedEventSource
   }
 })
 
@@ -616,61 +645,6 @@ test('BackgroundLayer shows only while its own preset\'s session is active, and 
   // here -- that path is verified live in the browser instead.)
 })
 
-test('truncateForSpeech caps text length so one long reply cannot monopolize the TTS queue', () => {
-  const { moduleObj } = loadBundle()
-  const { truncateForSpeech } = moduleObj._test
-
-  const short = '嗨嗨～你来啦！'
-  assert.equal(truncateForSpeech(short), short, 'text under the limit is untouched')
-
-  // A boundary well past 40% of the window: cut there, no ellipsis.
-  const withBoundary = 'A'.repeat(80) + '. ' + 'B'.repeat(80)
-  const cut = truncateForSpeech(withBoundary, 100)
-  assert.ok(cut.length <= 82, 'cuts at the sentence boundary, not mid-sentence')
-  assert.ok(cut.endsWith('.'), 'keeps the boundary punctuation')
-  assert.ok(!cut.includes('B'), 'drops everything after the boundary')
-
-  // No boundary within the window at all: hard cut + ellipsis.
-  const noBoundary = 'C'.repeat(300)
-  const hardCut = truncateForSpeech(noBoundary, 100)
-  assert.equal(hardCut, 'C'.repeat(100) + '…')
-})
-
-test('speakBrowser sends truncated text to the TTS endpoint for a very long reply', async () => {
-  const { moduleObj } = loadBundle()
-  const plugin = moduleObj.createVoiceClient({
-    presetName: 'teacher',
-    ttsPath: '/dsh-teacher/tts',
-    styles: { onee: { label: '御姐', instruct: 'x' } },
-    defaultStyle: 'onee',
-  })
-  const { slots, entries } = mockSlots()
-  plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
-  const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
-
-  const longReply = '第一句话说明背景信息。'.repeat(30) // way past MAX_SPEAK_CHARS
-  const calls = []
-  const savedFetch = globalThis.fetch
-  // Resolve (rather than hang forever) so speakBrowser's internal 5s
-  // give-up timer gets cleared instead of leaking a real pending timer
-  // past the end of this test.
-  globalThis.fetch = (url) => { calls.push(url); return Promise.resolve({ ok: true, blob: () => Promise.resolve({ id: 'audio' }) }) }
-  try {
-    SpeakToggle({
-      sessionId: 's1',
-      useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'teacher' } } }),
-      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
-      session: assistantSession(1, longReply),
-    })
-    await Promise.resolve().then(() => {}).then(() => {}).then(() => {})
-  } finally {
-    globalThis.fetch = savedFetch
-  }
-  assert.equal(calls.length, 1)
-  const sentText = decodeURIComponent(calls[0].match(/text=([^&]*)/)[1])
-  assert.ok(sentText.length < longReply.length, 'the full reply must not be sent verbatim to TTS')
-  assert.ok(sentText.length <= 151, 'sent text stays within the truncation cap (+ellipsis)')
-})
 
 test('a cheer fires without generating audio; only the assistant\'s actual reply text does', () => {
   // "I said good night and sister spoke many sentences" -- the cheer
@@ -808,13 +782,14 @@ test('a cheer NOT in the pre-baked manifest stays silent (no playClip, no live T
 
 test('a matching cheer clip never interrupts an in-flight live reply from the same turn', async () => {
   // The auto-read effect (declared first) can already have kicked off a
-  // live TTS request for the turn's actual reply by the time the
+  // live TTS stream for the turn's actual reply by the time the
   // cheer-audio effect (declared after it) resolves its manifest match --
-  // playClip must back off instead of stopAndClear()ing that generation
-  // out from under the real content. (Regression: playClip used to call
+  // playClip must back off instead of stopAndClear()ing that stream out
+  // from under the real content. (Regression: playClip used to call
   // stopAndClear() unconditionally, which aborted the reply's own
-  // in-flight fetch — confirmed live via net::ERR_ABORTED on the reply's
-  // /tts request right after a matching cheer fired in the same turn.)
+  // in-flight request — confirmed live via net::ERR_ABORTED on the
+  // reply's /tts request right after a matching cheer fired in the same
+  // turn.)
   const { moduleObj } = loadBundle()
   const plugin = moduleObj.createVoiceClient({
     presetName: 'sister',
@@ -827,7 +802,6 @@ test('a matching cheer clip never interrupts an in-flight live reply from the sa
   plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
   const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
 
-  const ttsCalls = []
   const played = []
   class FakeAudio {
     constructor(url) { this.url = url }
@@ -836,14 +810,16 @@ test('a matching cheer clip never interrupts an in-flight live reply from the sa
   }
   const savedAudio = globalThis.Audio
   const savedFetch = globalThis.fetch
+  const { FakeEventSource, instances } = makeFakeEventSource()
+  const savedEventSource = globalThis.EventSource
   globalThis.Audio = FakeAudio
   globalThis.fetch = (url) => {
     if (String(url) === '/dsh-sister/cheer-audio/manifest.json') {
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ '晚安呀，做个好梦！': '/dsh-sister/cheer-audio/03.m4a' }) })
     }
-    ttsCalls.push(url)
-    return new Promise(() => {}) // the reply's generation is still "in flight"
+    return Promise.reject(new Error('unexpected fetch: ' + url))
   }
+  globalThis.EventSource = FakeEventSource // the reply's stream never emits -- still "in flight"
   try {
     SpeakToggle({
       sessionId: 's1',
@@ -852,15 +828,17 @@ test('a matching cheer clip never interrupts an in-flight live reply from the sa
       // A real assistant reply this turn -- auto-read's 1000ms debounce
       // (stubbed to fire synchronously) calls voice.request() for it
       // BEFORE the cheer-audio effect's manifest fetch has a chance to
-      // resolve, so pendingController is already set when playClip runs.
+      // resolve, so pendingSource is already set when playClip runs.
       session: assistantSession(1, '晚安啦，做个好梦哦！'),
     })
     await Promise.resolve().then(() => {}).then(() => {}).then(() => {}).then(() => {}).then(() => {}).then(() => {})
   } finally {
     globalThis.Audio = savedAudio
     globalThis.fetch = savedFetch
+    globalThis.EventSource = savedEventSource
   }
-  assert.equal(ttsCalls.length, 1, 'the real reply still reaches the TTS endpoint')
+  assert.equal(instances.length, 1, 'the real reply still reaches the TTS endpoint')
+  assert.equal(instances[0].closed, false, 'the reply\'s stream is still open, not aborted by the cheer')
   assert.deepEqual(played, [], 'the cheer clip backs off instead of interrupting the in-flight reply')
 })
 

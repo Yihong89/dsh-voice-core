@@ -97,6 +97,7 @@ test('applyVoice registers commands, tools, projection, and TTS proxy', async ()
   assert.equal(registrations.projections[0].key, 'voiceSpeak')
   const paths = registrations.webRoutes.map((r) => r.path)
   assert.ok(paths.includes('/dsh-teacher/tts'))
+  assert.ok(paths.includes('/dsh-teacher/tts-stream'))
   assert.ok(paths.includes('/dsh-teacher/tts-health'))
   assert.ok(registrations.events['agent/session-start'])
   assert.ok(registrations.events['agent/pre-step'])
@@ -193,6 +194,21 @@ test('TTS proxy rejects a request without text', async () => {
   let body = ''
   const res = { writeHead: (s) => { status = s }, end: (b) => { body = b } }
   await tts.handler({ url: '/dsh-voice/tts?instruct=x' }, res)
+  assert.equal(status, 400)
+  assert.match(body, /text is required/)
+})
+
+test('TTS stream proxy rejects a request without text', async () => {
+  const { applyVoice } = await import('../index.js')
+  const { ctx, registrations } = mockCtx({ webServer: true })
+  await applyVoice(ctx, { ttsPath: '/dsh-voice/tts' })
+  dispose(ctx)
+  const ttsStream = registrations.webRoutes.find((r) => r.path === '/dsh-voice/tts-stream')
+  assert.ok(ttsStream, '/dsh-voice/tts-stream is registered')
+  let status = 0
+  let body = ''
+  const res = { writeHead: (s) => { status = s }, end: (b) => { body = b } }
+  await ttsStream.handler({ url: '/dsh-voice/tts-stream?instruct=x' }, res)
   assert.equal(status, 400)
   assert.match(body, /text is required/)
 })

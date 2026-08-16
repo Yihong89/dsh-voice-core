@@ -5,10 +5,13 @@
  * (dsh-teacher, dsh-sister) call `applyVoice(ctx, config)` from their own
  * `apply()`. It provides:
  *
- * - TTS proxy routes (`/dsh-voice/tts` + health) forwarding to the local
- *   Qwen3-TTS VoiceDesign service (127.0.0.1:3091, overridable via
- *   `DSH_VOICE_TTS_URL`). The path prefix is configurable so multiple
- *   consumers can coexist.
+ * - TTS proxy routes (`/dsh-voice/tts`, `/dsh-voice/tts-stream`, + health)
+ *   forwarding to the local Qwen3-TTS VoiceDesign service (127.0.0.1:3091,
+ *   overridable via `DSH_VOICE_TTS_URL`). The path prefix is configurable
+ *   so multiple consumers can coexist. `-stream` is a Server-Sent-Events
+ *   passthrough of the upstream's native streaming mode (true byte pipe,
+ *   never buffered) -- the client speaks through it for real audio now;
+ *   plain `/tts` is kept for compatibility/fallback.
  * - `speak` / `cheer` model tools (log-only `voice/*` events).
  * - `/speak /cheer /cheer-at /cheer-text /voice` commands.
  * - The `voiceSpeak` session projection (folded from `voice/*` events).
@@ -25,6 +28,7 @@
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { Readable } from 'node:stream'
 import { z } from 'zod'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
@@ -339,6 +343,52 @@ export async function applyVoice(ctx, input = {}) {
             'x-tts-ms': upstream.headers.get('x-tts-ms') ?? '',
           })
           res.end(buf)
+        } catch (error) {
+          res.writeHead(503, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: false, error: `tts service unreachable: ${String(error)}` }))
+        }
+      },
+    })
+    // Streaming counterpart of the route above: proxies mlx-audio's native
+    // streaming mode (see tts_service.py) so a reply starts playing in
+    // ~1s regardless of length instead of waiting for one giant response.
+    // Critically this PIPES the upstream response through byte-for-byte
+    // (Readable.fromWeb(upstream.body).pipe(res)) rather than buffering it
+    // with .arrayBuffer() the way the plain /tts route above does --
+    // buffering here would silently defeat the entire point of streaming.
+    const streamPath = config.ttsPath.replace(/\/$/, '') + '-stream'
+    webServer.register({
+      kind: 'exact',
+      path: streamPath,
+      handler: async (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://x')
+        const text = url.searchParams.get('text') ?? ''
+        const instruct = url.searchParams.get('instruct') ?? ''
+        if (!text) {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: false, error: 'text is required' }))
+          return
+        }
+        try {
+          const target = new URL('/tts-stream', config.ttsBase)
+          target.searchParams.set('text', text)
+          if (instruct) target.searchParams.set('instruct', instruct)
+          const upstream = await fetch(target.toString())
+          if (!upstream.ok || upstream.body === null) {
+            res.writeHead(502, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: `tts upstream ${upstream.status}` }))
+            return
+          }
+          res.writeHead(200, {
+            'content-type': 'text/event-stream',
+            'cache-control': 'no-store',
+            connection: 'keep-alive',
+          })
+          const upstreamStream = Readable.fromWeb(upstream.body)
+          upstreamStream.pipe(res)
+          // The browser gave up (session switch, superseded request) --
+          // stop pulling from upstream too instead of streaming for nobody.
+          req.on('close', () => { upstreamStream.destroy() })
         } catch (error) {
           res.writeHead(503, { 'content-type': 'application/json' })
           res.end(JSON.stringify({ ok: false, error: `tts service unreachable: ${String(error)}` }))
