@@ -46,7 +46,7 @@ function loadBundle() {
   // polling, for one). Default to safe no-ops; a test that needs to
   // observe real interval/timeout behavior installs its own local
   // override and restores it in a finally block (see the speakBrowser
-  // 5s-timeout and CheerChip tests).
+  // 5s-timeout tests).
   globalThis.setInterval = () => 0
   globalThis.clearInterval = () => {}
   // The auto-read effect is the ONLY path into voice.request() (see
@@ -104,7 +104,7 @@ test('client bundle top-level export is itself a valid cordis plugin (boot-row l
   assert.doesNotThrow(() => moduleObj.apply({ get: () => undefined }))
 })
 
-test('createVoiceClient registers speak toggle, cheer chip, and style picker', () => {
+test('createVoiceClient registers speak toggle and style picker', () => {
   const { moduleObj } = loadBundle()
   const plugin = moduleObj.createVoiceClient({
     presetName: 'sister',
@@ -121,7 +121,7 @@ test('createVoiceClient registers speak toggle, cheer chip, and style picker', (
   assert.equal(right.length, 1)
   assert.equal(right[0].register().opts.id, 'dsh-voice-sister-speak')
   const overlays = entries.filter((e) => e.slot === 'shell.overlay').map((e) => e.register().opts.id).sort()
-  assert.deepEqual(overlays, ['dsh-voice-sister-background', 'dsh-voice-sister-cheer-chip', 'dsh-voice-sister-hear-full', 'dsh-voice-sister-style-picker'])
+  assert.deepEqual(overlays, ['dsh-voice-sister-background', 'dsh-voice-sister-hear-full', 'dsh-voice-sister-style-picker'])
 })
 
 test('single-style config omits the picker button (no choice to make)', () => {
@@ -572,60 +572,6 @@ test('a preset\'s HearFullChip does not offer to play another preset\'s truncate
   }
 })
 
-test('a preset\'s CheerChip does not display a cheer fired in another preset\'s session', () => {
-  // store.cheer is shared by every mounted preset's CheerChip (they all
-  // subscribe to the same module-level store and render at the same fixed
-  // screen position). A sister-session cheer must not show up in teacher's
-  // chip under teacher's own title.
-  const { moduleObj } = loadBundle()
-  const { slots, entries } = mockSlots()
-  const sisterPlugin = moduleObj.createVoiceClient({
-    presetName: 'sister', ttsPath: '/dsh-sister/tts', cheerTitle: '💛 Sister says…',
-    styles: { paimon: { label: '派蒙', instruct: 'x' } }, defaultStyle: 'paimon',
-  })
-  const teacherPlugin = moduleObj.createVoiceClient({
-    presetName: 'teacher', ttsPath: '/dsh-teacher/tts', cheerTitle: '💛 Teacher says…',
-    styles: { onee: { label: '御姐', instruct: 'x' } }, defaultStyle: 'onee',
-  })
-  sisterPlugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
-  teacherPlugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
-
-  const speakToggleById = (id) => entries.filter((e) => e.slot === 'conversation.input.right' && e.register().opts.id === id)[0].register().component
-  const cheerChipById = (id) => entries.filter((e) => e.slot === 'shell.overlay' && e.register().opts.id === id)[0].register().component
-  const sisterSpeakToggle = speakToggleById('dsh-voice-sister-speak')
-  const teacherSpeakToggle = speakToggleById('dsh-voice-teacher-speak')
-  const sisterCheerChip = cheerChipById('dsh-voice-sister-cheer-chip')
-  const teacherCheerChip = cheerChipById('dsh-voice-teacher-cheer-chip')
-
-  // CheerChip's auto-hide uses a real 9s setTimeout; stub it so the test
-  // doesn't block on a live timer (its cleanup never runs — the React stub
-  // ignores useEffect's returned disposer).
-  const savedSetTimeout = globalThis.setTimeout
-  const savedClearTimeout = globalThis.clearTimeout
-  globalThis.setTimeout = () => 0
-  globalThis.clearTimeout = () => {}
-  try {
-    const state = { byId: { s1: { agentPreset: 'sister' } } }
-    const props = {
-      sessionId: 's1',
-      useSessions: (sel) => sel(state),
-      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: { seq: 1, text: '嗨嗨～你来啦！' } }),
-      session: { nodes: [], chat: { order: [], nodes: {} } },
-    }
-    // Both mounted preset instances see the same active (sister) session —
-    // exactly like the real page, where there's one active session and every
-    // preset's plugin is mounted globally.
-    sisterSpeakToggle(props)
-    teacherSpeakToggle(props)
-
-    assert.notEqual(sisterCheerChip(), null, 'sister CheerChip should show its own cheer')
-    assert.equal(teacherCheerChip(), null, 'teacher CheerChip must not show a sister-session cheer')
-  } finally {
-    globalThis.setTimeout = savedSetTimeout
-    globalThis.clearTimeout = savedClearTimeout
-  }
-})
-
 test('BackgroundLayer shows only while its own preset\'s session is active, and only if configured', () => {
   const { moduleObj } = loadBundle()
   const { slots, entries } = mockSlots()
@@ -729,22 +675,20 @@ test('speakBrowser sends truncated text to the TTS endpoint for a very long repl
 test('a cheer fires without generating audio; only the assistant\'s actual reply text does', () => {
   // "I said good night and sister spoke many sentences" -- the cheer
   // tool's own text and the auto-read of the full reply were two
-  // independent audio triggers for one turn. Now only the reply (what's
+  // independent audio triggers for one turn. Only the reply (what's
   // actually shown in the chat box) is ever sent to TTS; a cheer with no
-  // reply (e.g. the scheduler's /cheer-text fixed greeting) still shows
-  // its chip but stays silent.
+  // reply (e.g. the scheduler's /cheer-text fixed greeting) still shows up
+  // as its own tool-call line in the chat transcript, but stays silent.
   const { moduleObj } = loadBundle()
   const plugin = moduleObj.createVoiceClient({
     presetName: 'sister',
     ttsPath: '/dsh-sister/tts',
     styles: { paimon: { label: '派蒙', instruct: 'x' } },
     defaultStyle: 'paimon',
-    cheerTitle: '💛 Sister says…',
   })
   const { slots, entries } = mockSlots()
   plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
   const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
-  const { component: CheerChip } = entries.filter((e) => e.slot === 'shell.overlay' && e.register().opts.id === 'dsh-voice-sister-cheer-chip')[0].register()
 
   const calls = []
   const savedFetch = globalThis.fetch
@@ -762,8 +706,6 @@ test('a cheer fires without generating audio; only the assistant\'s actual reply
     globalThis.fetch = savedFetch
   }
   assert.equal(calls.length, 0, 'the cheer text alone must not reach TTS')
-  const chip = CheerChip()
-  assert.ok(chip !== null, 'the cheer chip still shows visually')
 })
 
 test('watchQueue polls the health route and getQueueStatus reflects it; ref-counted across multiple watchers', async () => {
