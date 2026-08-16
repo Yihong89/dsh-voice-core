@@ -806,6 +806,64 @@ test('a cheer NOT in the pre-baked manifest stays silent (no playClip, no live T
   assert.equal(ttsCalls.length, 0, 'a non-matching cheer still never reaches the TTS endpoint')
 })
 
+test('a matching cheer clip never interrupts an in-flight live reply from the same turn', async () => {
+  // The auto-read effect (declared first) can already have kicked off a
+  // live TTS request for the turn's actual reply by the time the
+  // cheer-audio effect (declared after it) resolves its manifest match --
+  // playClip must back off instead of stopAndClear()ing that generation
+  // out from under the real content. (Regression: playClip used to call
+  // stopAndClear() unconditionally, which aborted the reply's own
+  // in-flight fetch — confirmed live via net::ERR_ABORTED on the reply's
+  // /tts request right after a matching cheer fired in the same turn.)
+  const { moduleObj } = loadBundle()
+  const plugin = moduleObj.createVoiceClient({
+    presetName: 'sister',
+    ttsPath: '/dsh-sister/tts',
+    styles: { paimon: { label: '派蒙', instruct: 'x' } },
+    defaultStyle: 'paimon',
+    cheerAudioManifestUrl: '/dsh-sister/cheer-audio/manifest.json',
+  })
+  const { slots, entries } = mockSlots()
+  plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
+
+  const ttsCalls = []
+  const played = []
+  class FakeAudio {
+    constructor(url) { this.url = url }
+    play() { played.push(this.url); return Promise.resolve() }
+    pause() {}
+  }
+  const savedAudio = globalThis.Audio
+  const savedFetch = globalThis.fetch
+  globalThis.Audio = FakeAudio
+  globalThis.fetch = (url) => {
+    if (String(url) === '/dsh-sister/cheer-audio/manifest.json') {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ '晚安呀，做个好梦！': '/dsh-sister/cheer-audio/03.m4a' }) })
+    }
+    ttsCalls.push(url)
+    return new Promise(() => {}) // the reply's generation is still "in flight"
+  }
+  try {
+    SpeakToggle({
+      sessionId: 's1',
+      useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: { seq: 1, text: '晚安呀，做个好梦！' } }),
+      // A real assistant reply this turn -- auto-read's 1000ms debounce
+      // (stubbed to fire synchronously) calls voice.request() for it
+      // BEFORE the cheer-audio effect's manifest fetch has a chance to
+      // resolve, so pendingController is already set when playClip runs.
+      session: assistantSession(1, '晚安啦，做个好梦哦！'),
+    })
+    await Promise.resolve().then(() => {}).then(() => {}).then(() => {}).then(() => {}).then(() => {}).then(() => {})
+  } finally {
+    globalThis.Audio = savedAudio
+    globalThis.fetch = savedFetch
+  }
+  assert.equal(ttsCalls.length, 1, 'the real reply still reaches the TTS endpoint')
+  assert.deepEqual(played, [], 'the cheer clip backs off instead of interrupting the in-flight reply')
+})
+
 test('watchQueue polls the health route and getQueueStatus reflects it; ref-counted across multiple watchers', async () => {
   const { moduleObj } = loadBundle()
   const { voice } = moduleObj._test
