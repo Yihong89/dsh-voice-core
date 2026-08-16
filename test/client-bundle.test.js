@@ -240,6 +240,84 @@ test('switching sessions discards audio still in flight for the session left beh
   assert.deepEqual(played, [], 'session-1 audio must not play after switching to session 2')
 })
 
+test('switching to a different preset\'s session cancels a still-pending auto-read debounce for the one left behind', () => {
+  // The auto-read effect waits 1s before firing so a burst of streaming
+  // updates only ever sends the settled reply once. If the user switches
+  // away (to a DIFFERENT preset's session, so isVoice flips false) inside
+  // that 1s window, the scheduled timer must never fire at all -- it must
+  // not silently push the abandoned session's reply to TTS a moment later.
+  const { moduleObj } = loadBundle()
+  const sisterPlugin = moduleObj.createVoiceClient({
+    presetName: 'sister', ttsPath: '/dsh-sister/tts',
+    styles: { paimon: { label: '派蒙', instruct: 'x' } }, defaultStyle: 'paimon',
+  })
+  const teacherPlugin = moduleObj.createVoiceClient({
+    presetName: 'teacher', ttsPath: '/dsh-teacher/tts',
+    styles: { onee: { label: '御姐', instruct: 'x' } }, defaultStyle: 'onee',
+  })
+  const { slots, entries } = mockSlots()
+  sisterPlugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  teacherPlugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  const speakToggleById = (id) => entries.filter((e) => e.slot === 'conversation.input.right' && e.register().opts.id === id)[0].register().component
+  const sisterSpeakToggle = speakToggleById('dsh-voice-sister-speak')
+  const teacherSpeakToggle = speakToggleById('dsh-voice-teacher-speak')
+
+  const fetchCalls = []
+  const savedFetch = globalThis.fetch
+  const savedSetTimeout = globalThis.setTimeout
+  const savedClearTimeout = globalThis.clearTimeout
+  let nextId = 0
+  const pendingTimers = new Map() // id -> fn
+  const clearedIds = new Set()
+  globalThis.fetch = (url) => { fetchCalls.push(url); return new Promise(() => {}) }
+  globalThis.setTimeout = (fn, ms) => {
+    if (ms !== 1000) return 0 // let other timers (chip auto-dismiss, etc.) no-op as usual
+    const id = ++nextId
+    pendingTimers.set(id, fn)
+    return id
+  }
+  globalThis.clearTimeout = (id) => { clearedIds.add(id) }
+
+  try {
+    const state = { byId: { s1: { agentPreset: 'sister' }, s2: { agentPreset: 'teacher' } } }
+    // Sister session s1's reply lands; its 1s debounce is scheduled but not fired yet.
+    sisterSpeakToggle({
+      sessionId: 's1',
+      useSessions: (sel) => sel(state),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+      session: assistantSession(1, 'hello from sister session'),
+    })
+    assert.equal(pendingTimers.size, 1, 'sister schedules its debounce')
+
+    // User switches to s2, a TEACHER session -- sister's SpeakToggle re-renders
+    // with isVoice now false for the abandoned session.
+    sisterSpeakToggle({
+      sessionId: 's2',
+      useSessions: (sel) => sel(state),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+      session: { nodes: [], chat: { order: [], nodes: {} } },
+    })
+    teacherSpeakToggle({
+      sessionId: 's2',
+      useSessions: (sel) => sel(state),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+      session: { nodes: [], chat: { order: [], nodes: {} } },
+    })
+
+    // Fire whatever timers survive -- if the pending one wasn't cancelled,
+    // this is where it would (wrongly) push sister's old reply to TTS.
+    for (const [id, fn] of pendingTimers) {
+      if (!clearedIds.has(id)) fn()
+    }
+
+    assert.deepEqual(fetchCalls, [], 'the abandoned session\'s reply must never reach the TTS endpoint')
+  } finally {
+    globalThis.fetch = savedFetch
+    globalThis.setTimeout = savedSetTimeout
+    globalThis.clearTimeout = savedClearTimeout
+  }
+})
+
 test('speakBrowser aborts an older in-flight request when a newer one arrives', () => {
   // Only the latest speak/cheer should ever reach TTS: an older reply the
   // conversation has already moved past must not keep occupying the
