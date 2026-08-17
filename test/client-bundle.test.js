@@ -451,6 +451,69 @@ test('speakBrowser closes an older in-flight stream when a newer one arrives', (
   assert.equal(instances[1].closed, false, 'the newest stream must still be open')
 })
 
+test('resolveInstruct overrides the static default style for the auto-read TTS request', () => {
+  const { moduleObj } = loadBundle()
+  const plugin = moduleObj.createVoiceClient({
+    presetName: 'sister',
+    ttsPath: '/dsh-sister/tts',
+    styles: { paimon: { label: '派蒙', instruct: 'static-default-instruct' } },
+    defaultStyle: 'paimon',
+    resolveInstruct: (sessionId) => (sessionId === 's1' ? 'resolved-per-session-instruct' : ''),
+  })
+  const { slots, entries } = mockSlots()
+  plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
+
+  const { FakeEventSource, instances } = makeFakeEventSource()
+  const savedEventSource = globalThis.EventSource
+  globalThis.EventSource = FakeEventSource
+  try {
+    const s1Props = {
+      sessionId: 's1',
+      useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+    }
+    primeThenReply(SpeakToggle, s1Props)
+    SpeakToggle({ ...s1Props, session: assistantSession(1, 'hello') })
+    assert.equal(instances.length, 1)
+    const sentInstruct = decodeURIComponent(instances[0].url.match(/instruct=([^&]*)/)[1])
+    assert.equal(sentInstruct, 'resolved-per-session-instruct', 'resolveInstruct wins over the static default')
+  } finally {
+    globalThis.EventSource = savedEventSource
+  }
+})
+
+test('resolveInstruct returning empty falls back to the static default style', () => {
+  const { moduleObj } = loadBundle()
+  const plugin = moduleObj.createVoiceClient({
+    presetName: 'sister',
+    ttsPath: '/dsh-sister/tts',
+    styles: { paimon: { label: '派蒙', instruct: 'static-default-instruct' } },
+    defaultStyle: 'paimon',
+    resolveInstruct: () => '',
+  })
+  const { slots, entries } = mockSlots()
+  plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
+
+  const { FakeEventSource, instances } = makeFakeEventSource()
+  const savedEventSource = globalThis.EventSource
+  globalThis.EventSource = FakeEventSource
+  try {
+    const s1Props = {
+      sessionId: 's1',
+      useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
+      useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
+    }
+    primeThenReply(SpeakToggle, s1Props)
+    SpeakToggle({ ...s1Props, session: assistantSession(1, 'hello') })
+    const sentInstruct = decodeURIComponent(instances[0].url.match(/instruct=([^&]*)/)[1])
+    assert.equal(sentInstruct, 'static-default-instruct')
+  } finally {
+    globalThis.EventSource = savedEventSource
+  }
+})
+
 test('a newer speak request stops and clears audio already queued from an earlier one for the same session', () => {
   // e.g. a streaming reply: the auto-read effect can fire once for a
   // partial snapshot and again for the final, longer text of the SAME

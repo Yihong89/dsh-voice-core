@@ -25,6 +25,7 @@
 - 自动朗读每条 assistant 回复（1s 先显示文字），带**按会话持久化的
   localStorage cursor** —— 切换会话/刷新页面不会重复朗读旧消息
 - preset 门控：只在该消费插件的 agent preset 会话里渲染
+- `opts.resolveInstruct(sessionId)` 可选：按会话动态决定 TTS instruct（优先于 `defaultStyle` 的静态值），供需要"每个会话自己的音色"的消费者使用
 
 ## 配置示例
 
