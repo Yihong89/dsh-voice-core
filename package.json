@@ -1,6 +1,6 @@
 {
   "name": "dsh-voice-core",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Shared voice engine for dsh companion plugins (dsh-teacher, dsh-sister): Qwen3-TTS proxy, audio-queue playback, auto-read of assistant replies, speak/cheer tools, voice-style presets, and the daily greeting scheduler. Consumers compose it via a preset row and configure the voice style (e.g. 御姐 / 派蒙).",
   "type": "module",
   "main": "index.js",

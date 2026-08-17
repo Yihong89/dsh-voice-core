@@ -26,6 +26,7 @@
   localStorage cursor** —— 切换会话/刷新页面不会重复朗读旧消息
 - preset 门控：只在该消费插件的 agent preset 会话里渲染
 - `opts.resolveInstruct(sessionId)` 可选：按会话动态决定 TTS instruct（优先于 `defaultStyle` 的静态值），供需要"每个会话自己的音色"的消费者使用
+- `opts.showSpeakToggle` / `opts.showStylePicker`（默认都是 `true`）：隐藏对应的图标（自动朗读、队列徽标等底层行为不受影响，只是不渲染 UI），供有自己一套配置界面的消费者使用
 
 ## 配置示例
 
