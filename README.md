@@ -1,8 +1,8 @@
 # dsh-voice-core
 
-共享语音引擎（Shared Voice Engine）—— dsh-teacher 与 dsh-sister 的公共底层。
+共享语音引擎（Shared Voice Engine）—— dsh-teacher 与 dsh-companion 的公共底层。
 
-一个 **library**，不是独立插件：消费插件（dsh-teacher / dsh-sister）在自己的
+一个 **library**，不是独立插件：消费插件（dsh-teacher / dsh-companion）在自己的
 `apply()` 里调用 `applyVoice(ctx, config)`（host 侧），client 侧通过
 `createVoiceClient(opts)` 组合共享 UI。语音由 mac mini 上的 **Qwen3-TTS**
 （VoiceDesign，MPS 加速）生成，浏览器播放——声音从使用者自己的机器出来。
@@ -20,13 +20,13 @@
 - 音色配置驱动：`config.styles`（音色目录）+ `config.defaultStyle`
 
 **Client（`createVoiceClient(opts)`）**
-- 🔊 speak 开关 + 🎤 音色选择器（试听 + 记住选择）+ 💛 cheer 卡片
+- 无内置 UI（不渲染任何图标/按钮）——只提供底层行为：自动朗读、音频播放、
+  💛 cheer 卡片，配置/选择界面完全交给消费插件自己实现
 - 音频队列播放（fetch WAV → `<audio>`，顺序播放不重叠）
 - 自动朗读每条 assistant 回复（1s 先显示文字），带**按会话持久化的
   localStorage cursor** —— 切换会话/刷新页面不会重复朗读旧消息
-- preset 门控：只在该消费插件的 agent preset 会话里渲染
+- preset 门控：只在该消费插件的 agent preset 会话里生效
 - `opts.resolveInstruct(sessionId)` 可选：按会话动态决定 TTS instruct（优先于 `defaultStyle` 的静态值），供需要"每个会话自己的音色"的消费者使用
-- `opts.showSpeakToggle` / `opts.showStylePicker`（默认都是 `true`）：隐藏对应的图标（自动朗读、队列徽标等底层行为不受影响，只是不渲染 UI），供有自己一套配置界面的消费者使用
 
 ## 配置示例
 
@@ -70,7 +70,7 @@ profile 的 `cordis.patch.yml` 注册事件：
       name: dsh-voice-core/register-events
 ```
 
-> pnpm 11 默认 `blockExoticSubdeps: true`，而 dsh-teacher/dsh-sister 把
+> pnpm 11 默认 `blockExoticSubdeps: true`，而 dsh-teacher/dsh-companion 把
 > dsh-voice-core 作为 git 子依赖。若报
 > `ERR_PNPM_EXOTIC_SUBDEP`，在 profile 的 `pnpm-workspace.yaml` 加
 > `blockExoticSubdeps: false`。
@@ -78,7 +78,7 @@ profile 的 `cordis.patch.yml` 注册事件：
 ## 测试
 
 ```bash
-node --test test/*.test.js   # 29 tests
+node --test test/*.test.js   # 49 tests
 ```
 
 ## License

@@ -142,7 +142,7 @@ test('client bundle top-level export is itself a valid cordis plugin (boot-row l
   assert.doesNotThrow(() => moduleObj.apply({ get: () => undefined }))
 })
 
-test('createVoiceClient registers speak toggle and style picker', () => {
+test('createVoiceClient registers the invisible auto-read mount and the background overlay, no picker/toggle UI', () => {
   const { moduleObj } = loadBundle()
   const plugin = moduleObj.createVoiceClient({
     presetName: 'sister',
@@ -159,22 +159,21 @@ test('createVoiceClient registers speak toggle and style picker', () => {
   assert.equal(right.length, 1)
   assert.equal(right[0].register().opts.id, 'dsh-voice-sister-speak')
   const overlays = entries.filter((e) => e.slot === 'shell.overlay').map((e) => e.register().opts.id).sort()
-  assert.deepEqual(overlays, ['dsh-voice-sister-background', 'dsh-voice-sister-style-picker'])
+  assert.deepEqual(overlays, ['dsh-voice-sister-background'], 'no style-picker overlay is registered')
 })
 
-test('single-style config omits the picker button (no choice to make)', () => {
+test('SpeakToggle never renders any UI, regardless of style count', () => {
   const { moduleObj } = loadBundle()
   const plugin = moduleObj.createVoiceClient({
     presetName: 'teacher',
     ttsPath: '/dsh-teacher/tts',
-    styles: { onee: { label: '御姐', instruct: 'x' } },
+    styles: { onee: { label: '御姐', instruct: 'x' }, paimon: { label: '派蒙', instruct: 'y' } },
     defaultStyle: 'onee',
   })
   const { slots, entries } = mockSlots()
   plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
   const right = entries.filter((e) => e.slot === 'conversation.input.right')
   assert.equal(right.length, 1)
-  // Component renders a div; with one style there is only the 🔊 button.
   const { component: SpeakToggle } = right[0].register()
   const tree = SpeakToggle({
     sessionId: 's1',
@@ -182,10 +181,7 @@ test('single-style config omits the picker button (no choice to make)', () => {
     useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
     session: { nodes: [], chat: { order: [], nodes: {} } },
   })
-  assert.ok(tree !== null)
-  assert.equal(tree.type, 'div')
-  const buttons = tree.children.filter((c) => c && c.type === 'button')
-  assert.equal(buttons.length, 1, 'only the speak toggle when one style')
+  assert.equal(tree, null, 'no icons ever render, even with multiple styles configured')
 })
 
 test('a preset\'s SpeakToggle does not auto-read a session belonging to another preset', () => {
@@ -514,66 +510,15 @@ test('resolveInstruct returning empty falls back to the static default style', (
   }
 })
 
-test('showStylePicker: false hides the 🎤 button and does not register the picker overlay, even with multiple styles', () => {
-  const { moduleObj } = loadBundle()
-  const plugin = moduleObj.createVoiceClient({
-    presetName: 'sister',
-    ttsPath: '/dsh-sister/tts',
-    styles: { paimon: { label: '派蒙', instruct: 'x' }, cute: { label: '软萌', instruct: 'y' } },
-    defaultStyle: 'paimon',
-    showStylePicker: false,
-  })
-  const { slots, entries } = mockSlots()
-  plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
-  const overlays = entries.filter((e) => e.slot === 'shell.overlay').map((e) => e.register().opts.id)
-  assert.ok(!overlays.includes('dsh-voice-sister-style-picker'), 'picker overlay is not registered at all')
-
-  const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
-  const tree = SpeakToggle({
-    sessionId: 's1',
-    useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
-    useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
-    session: { nodes: [], chat: { order: [], nodes: {} } },
-  })
-  const buttons = (tree ? tree.children : []).filter((c) => c && c.type === 'button')
-  assert.equal(buttons.length, 1, 'only the 🔊 speak toggle remains')
-})
-
-test('showSpeakToggle: false and showStylePicker: false together render nothing', () => {
-  const { moduleObj } = loadBundle()
-  const plugin = moduleObj.createVoiceClient({
-    presetName: 'sister',
-    ttsPath: '/dsh-sister/tts',
-    styles: { paimon: { label: '派蒙', instruct: 'x' }, cute: { label: '软萌', instruct: 'y' } },
-    defaultStyle: 'paimon',
-    showSpeakToggle: false,
-    showStylePicker: false,
-  })
-  const { slots, entries } = mockSlots()
-  plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
-  const overlays = entries.filter((e) => e.slot === 'shell.overlay').map((e) => e.register().opts.id)
-  assert.ok(!overlays.includes('dsh-voice-sister-style-picker'))
-
-  const { component: SpeakToggle } = entries.filter((e) => e.slot === 'conversation.input.right')[0].register()
-  const tree = SpeakToggle({
-    sessionId: 's1',
-    useSessions: (sel) => sel({ byId: { s1: { agentPreset: 'sister' } } }),
-    useProjection: () => ({ speakEnabled: true, lastSpoken: null, lastCheer: null }),
-    session: { nodes: [], chat: { order: [], nodes: {} } },
-  })
-  assert.equal(tree, null, 'no icons to show ⇒ component renders nothing')
-})
-
-test('auto-read and queue polling keep working with both UI icons hidden', () => {
-  // Suppressing the icons must not suppress the underlying behavior.
+test('auto-read still fires even though SpeakToggle renders nothing', () => {
+  // No UI at all must not mean no behavior -- auto-read, the underlying
+  // point of mounting this component, still has to work.
   const { moduleObj } = loadBundle()
   const plugin = moduleObj.createVoiceClient({
     presetName: 'sister',
     ttsPath: '/dsh-sister/tts',
     styles: { paimon: { label: '派蒙', instruct: 'x' } },
     defaultStyle: 'paimon',
-    showSpeakToggle: false,
-    showStylePicker: false,
   })
   const { slots, entries } = mockSlots()
   plugin.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
